@@ -1,0 +1,50 @@
+# Terminal editor launched by the [E] editor keys in the browsers
+# (list entry, search popup, remote edit). Plain command line, no shell:
+# quotes are honored, ~ is expanded. GUI editors that detach need a wait
+# flag (e.g. "code --wait"). Leave empty to disable the editor keys.
+editor: "hx"
+
+accounts:
+  - id: "prod-web"
+    name: "Production Web 01"
+    protocol: "sftp"
+    host: "ssh.example.com"
+    port: 22
+    auth:
+      type: "key"
+      username: "deploy"
+      key_path: "~/.ssh/id_ed25519"
+      passphrase_prompt: true
+
+  - id: "legacy-ftps"
+    name: "Legacy FTPS"
+    protocol: "ftps"
+    host: "ftp.example.com"
+    port: 21
+    tls_mode: "explicit"
+    auth:
+      type: "password"
+      username: "deploy"
+      password_env: "GODEPLOY_FTP_PASSWORD"
+
+projects:
+  - id: "api-backend"
+    name: "Backend API"
+    account_id: "prod-web"
+    local_root: "/Users/dev/code/api-backend"
+    path_mappings:
+      - local_path: "public"
+        remote_path: "/var/www/api-backend"
+      - local_path: "deploy/config"
+        remote_path: "/etc/api-backend"
+    default_diff_mode: "text"
+    text_diff_options:
+      ignore_whitespace: true
+      ignore_blank_lines: true
+      strip_comments: true
+    exclusions:
+      - ".git/"
+      - ".env*"
+      - "node_modules/"
+      - "vendor/"
+      - "storage/logs/*.log"
