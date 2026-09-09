@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"godeploy/internal/config"
+	"preflight/internal/config"
 )
 
 // ResolveRemotePath maps an absolute local path to the remote path it

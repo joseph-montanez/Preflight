@@ -7,8 +7,8 @@ import (
 	"path"
 	"strings"
 
-	"godeploy/internal/domain"
-	ignoreengine "godeploy/internal/ignore"
+	"preflight/internal/domain"
+	ignoreengine "preflight/internal/ignore"
 )
 
 func ScanRemote(client domain.RemoteClient, projectRoot, scope string, ignores *ignoreengine.Engine, onFile func()) (map[string]*domain.FileMeta, error) {

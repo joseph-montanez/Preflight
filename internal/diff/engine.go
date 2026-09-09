@@ -9,7 +9,7 @@ import (
 	"regexp"
 	"strings"
 
-	"godeploy/internal/domain"
+	"preflight/internal/domain"
 
 	"github.com/hexops/gotextdiff"
 	"github.com/hexops/gotextdiff/myers"

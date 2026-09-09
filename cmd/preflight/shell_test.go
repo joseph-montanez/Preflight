@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"godeploy/internal/config"
+	"preflight/internal/config"
 )
 
 func TestShellArgsSftpKey(t *testing.T) {
@@ -87,7 +87,7 @@ func TestConfigureAskPassRoundTrip(t *testing.T) {
 	}
 	defer cleanup()
 
-	if got := os.Getenv("GODEPLOY_ASKPASS_SECRET"); got != "s3cret" {
+	if got := os.Getenv("PREFLIGHT_ASKPASS_SECRET"); got != "s3cret" {
 		t.Fatalf("secret env = %q, want s3cret", got)
 	}
 	if os.Getenv("SSH_ASKPASS") == "" || os.Getenv("SSH_ASKPASS_REQUIRE") != "force" {
@@ -110,7 +110,7 @@ func TestConfigureAskPassRoundTrip(t *testing.T) {
 	}
 
 	cleanup()
-	for _, key := range []string{"SSH_ASKPASS", "SSH_ASKPASS_REQUIRE", "GODEPLOY_ASKPASS_SECRET"} {
+	for _, key := range []string{"SSH_ASKPASS", "SSH_ASKPASS_REQUIRE", "PREFLIGHT_ASKPASS_SECRET"} {
 		if os.Getenv(key) != "" {
 			t.Fatalf("env %s should be unset after cleanup", key)
 		}

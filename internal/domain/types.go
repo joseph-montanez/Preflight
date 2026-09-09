@@ -94,6 +94,14 @@ type RemoteClient interface {
 	FastHash(path string) (string, error)
 }
 
+// Execer runs a shell command on the remote host, streaming stdout and
+// stderr as it runs. It is implemented by transports with a shell (SFTP);
+// FTP has no exec channel, so task steps type-assert it and report a clear
+// error for accounts that cannot run commands.
+type Execer interface {
+	Exec(command string, stdout, stderr io.Writer) error
+}
+
 type RenameCapable interface {
 	Rename(oldPath, newPath string) error
 }

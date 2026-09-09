@@ -5,7 +5,7 @@ import (
 	"strconv"
 	"strings"
 
-	"godeploy/internal/config"
+	"preflight/internal/config"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -18,41 +18,130 @@ var (
 	faintStyle    = lipgloss.NewStyle().Faint(true)
 )
 
-// Model selects either a project to synchronize or an account for a direct
-// SSH shell. The accounts view includes unlinked accounts, while T on a
-// highlighted project shells into that project's account.
+// Action is the first-step choice in the startup launcher. The order is
+// the menu order: sync, upload, download, ssh, manage, run.
+type Action string
+
+const (
+	ActionSync     Action = "sync"
+	ActionUpload   Action = "upload"
+	ActionDownload Action = "download"
+	ActionSSH      Action = "ssh"
+	ActionManage   Action = "manage"
+	ActionRun      Action = "run"
+)
+
+// Actions lists the launcher menu in display order.
+var Actions = []Action{ActionSync, ActionUpload, ActionDownload, ActionSSH, ActionManage, ActionRun}
+
+func actionLabel(a Action) string {
+	switch a {
+	case ActionSync:
+		return "Sync"
+	case ActionUpload:
+		return "Upload"
+	case ActionDownload:
+		return "Download"
+	case ActionSSH:
+		return "SSH"
+	case ActionManage:
+		return "Manage"
+	case ActionRun:
+		return "Run"
+	default:
+		return string(a)
+	}
+}
+
+func actionHint(a Action) string {
+	switch a {
+	case ActionSync:
+		return "compare and deploy a project"
+	case ActionUpload:
+		return "browse local files and upload"
+	case ActionDownload:
+		return "browse the server and download"
+	case ActionSSH:
+		return "open a shell into an account"
+	case ActionManage:
+		return "edit accounts and projects"
+	case ActionRun:
+		return "run a saved task"
+	default:
+		return ""
+	}
+}
+
+const (
+	stageAction = iota
+	stageTarget
+)
+
+// Model is the startup launcher. Step 1 picks an action; step 2 picks the
+// filtered target: a project for sync/upload/download, an account for ssh,
+// a task for run, and no second step for manage.
 type Model struct {
-	projects        []config.Project
-	accounts        []config.Account
-	accountsView    bool
+	projects []config.Project
+	accounts []config.Account
+	tasks    []config.Task
+
+	stage        int
+	actionCursor int
+	action       Action
+	done         bool
+
 	cursor          int
 	width           int
 	height          int
 	selected        string
 	selectedAccount string
+	selectedTask    string
 	status          string
 }
 
-// New accepts accounts as an optional second argument for compatibility with
-// callers that only need the original project picker.
-func New(projects []config.Project, accountLists ...[]config.Account) Model {
-	m := Model{projects: projects}
-	if len(accountLists) > 0 {
-		m.accounts = accountLists[0]
+// New builds a launcher over projects, accounts, and tasks. The launcher
+// always starts on the action menu.
+func New(projects []config.Project, accounts []config.Account, tasks []config.Task) Model {
+	return Model{projects: projects, accounts: accounts, tasks: tasks}
+}
+
+// NewForAction starts the launcher directly on the filtered target step for
+// the given action, skipping the action menu. It backs CLI mode flags given
+// without -p (e.g. preflight -remote picks a project for download).
+// Manage needs no target, so it starts on the action menu like New.
+func NewForAction(projects []config.Project, accounts []config.Account, tasks []config.Task, action Action) Model {
+	m := Model{projects: projects, accounts: accounts, tasks: tasks}
+	if action == ActionManage || action == "" {
+		return m
 	}
-	if len(projects) == 0 && len(m.accounts) > 0 {
-		m.accountsView = true
-	}
+	m.action = action
+	m.stage = stageTarget
 	return m
 }
 
-// Selected returns the chosen project ID, or "" when the user quit
-// without selecting.
+// Selected returns the chosen project ID, or "" when the user quit or
+// chose something other than a project.
 func (m Model) Selected() string { return m.selected }
 
 // SelectedAccount returns the account chosen for a direct shell, or "" when
-// the user chose a project or quit.
+// the user chose something else or quit.
 func (m Model) SelectedAccount() string { return m.selectedAccount }
+
+// SelectedTask returns the task chosen for a run, or "" when the user
+// chose something else or quit.
+func (m Model) SelectedTask() string { return m.selectedTask }
+
+// SelectedAction returns the confirmed action, or "" when the user quit
+// without confirming a choice.
+func (m Model) SelectedAction() Action {
+	if !m.done {
+		return ""
+	}
+	return m.action
+}
+
+// ManagePicked reports whether the user chose the Manage action.
+func (m Model) ManagePicked() bool { return m.done && m.action == ActionManage }
 
 func (m Model) Init() tea.Cmd { return nil }
 
@@ -62,69 +151,118 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width, m.height = msg.Width, msg.Height
 	case tea.KeyMsg:
 		switch key := msg.String(); key {
-		case "q", "ctrl+c", "esc":
+		case "q", "ctrl+c":
+			return m, tea.Quit
+		case "esc":
+			if m.stage == stageTarget {
+				m.stage = stageAction
+				m.cursor = 0
+				m.status = ""
+				return m, nil
+			}
 			return m, tea.Quit
 		case "enter":
-			if m.accountsView {
-				if m.selectAccountAtCursor() {
-					return m, tea.Quit
-				}
-				return m, nil
+			if m.stage == stageAction {
+				return m.selectActionAtCursor()
 			}
-			if len(m.projects) > 0 && m.cursor < len(m.projects) {
-				m.selected = m.projects[m.cursor].ID
-			}
-			return m, tea.Quit
-		case "t":
-			if m.accountsView {
-				if m.selectAccountAtCursor() {
-					return m, tea.Quit
-				}
-				return m, nil
-			}
-			if m.cursor >= 0 && m.cursor < len(m.projects) {
-				m.selectAccount(m.projects[m.cursor].AccountID)
-				if m.selectedAccount != "" {
-					return m, tea.Quit
-				}
-			}
-		case "a":
-			m.accountsView = true
-			m.cursor = 0
-			m.status = ""
-		case "p":
-			m.accountsView = false
-			m.cursor = 0
-			m.status = ""
-		case "tab":
-			m.accountsView = !m.accountsView
-			m.cursor = 0
-			m.status = ""
+			return m.selectTargetAtCursor()
 		case "up", "k":
-			if m.cursor > 0 {
-				m.cursor--
+			if m.cursorPos() > 0 {
+				m.cursorMove(-1)
 			}
 		case "down", "j":
-			if m.cursor < m.listLen()-1 {
-				m.cursor++
+			if m.cursorPos() < m.listLen()-1 {
+				m.cursorMove(1)
 			}
 		case "home", "g":
-			m.cursor = 0
+			m.cursorSet(0)
 		case "end", "G":
-			m.cursor = max(0, m.listLen()-1)
+			m.cursorSet(max(0, m.listLen()-1))
 		default:
-			// 1..9 jump within whichever list is visible.
+			// 1..9 jump within the visible list (1..5 on the action menu).
 			if n, err := strconv.Atoi(key); err == nil && n >= 1 && n <= m.listLen() {
-				m.cursor = n - 1
+				m.cursorSet(n - 1)
 			}
 		}
 	}
 	return m, nil
 }
 
+// cursorPos returns the cursor for the current stage.
+func (m Model) cursorPos() int {
+	if m.stage == stageAction {
+		return m.actionCursor
+	}
+	return m.cursor
+}
+
+func (m *Model) cursorMove(delta int) {
+	if m.stage == stageAction {
+		m.actionCursor += delta
+	} else {
+		m.cursor += delta
+	}
+}
+
+func (m *Model) cursorSet(pos int) {
+	if m.stage == stageAction {
+		m.actionCursor = pos
+	} else {
+		m.cursor = pos
+	}
+}
+
+// selectActionAtCursor moves from the action menu to the filtered target
+// list, or quits immediately for the manage action.
+func (m Model) selectActionAtCursor() (tea.Model, tea.Cmd) {
+	if m.actionCursor < 0 || m.actionCursor >= len(Actions) {
+		return m, nil
+	}
+	m.action = Actions[m.actionCursor]
+	m.status = ""
+	if m.action == ActionManage {
+		m.done = true
+		return m, tea.Quit
+	}
+	m.stage = stageTarget
+	m.cursor = 0
+	return m, nil
+}
+
+// selectTargetAtCursor confirms the filtered target and quits.
+func (m Model) selectTargetAtCursor() (tea.Model, tea.Cmd) {
+	if m.action == ActionSSH {
+		if m.selectAccountAtCursor() {
+			m.done = true
+			return m, tea.Quit
+		}
+		return m, nil
+	}
+	if m.action == ActionRun {
+		if m.cursor >= 0 && m.cursor < len(m.tasks) {
+			m.selectedTask = m.tasks[m.cursor].ID
+			m.done = true
+			return m, tea.Quit
+		}
+		return m, nil
+	}
+	if len(m.projects) > 0 && m.cursor >= 0 && m.cursor < len(m.projects) {
+		m.selected = m.projects[m.cursor].ID
+		m.done = true
+		return m, tea.Quit
+	}
+	return m, nil
+}
+
 func (m Model) listLen() int {
-	if m.accountsView {
+	if m.stage == stageAction {
+		return len(Actions)
+	}
+	if m.action == ActionSSH {
 		return len(m.accounts)
+	}
+	if m.action == ActionRun {
+		return len(m.tasks)
 	}
 	return len(m.projects)
 }
@@ -156,16 +294,57 @@ func (m *Model) selectAccount(id string) {
 
 func (m Model) View() string {
 	if m.width == 0 {
-		return "godeploy: initializing..."
+		return "preflight: initializing..."
 	}
+	if m.stage == stageTarget {
+		return m.viewTarget()
+	}
+	return m.viewAction()
+}
+
+func (m Model) viewAction() string {
 	var b strings.Builder
-	if m.accountsView {
+	b.WriteString(headerStyle.Render(" What do you want to do?") + "\n")
+	maxRows := max(3, m.height-3)
+	for i, a := range Actions {
+		if i >= maxRows {
+			b.WriteString(faintStyle.Render(" …") + "\n")
+			break
+		}
+		marker := "  "
+		if i == m.actionCursor {
+			marker = "▸ "
+		}
+		line := fmt.Sprintf("%s%-10s %s", marker, actionLabel(a), actionHint(a))
+		if i == m.actionCursor {
+			b.WriteString(selectedStyle.Render(truncate(line, m.width)) + "\n")
+		} else {
+			b.WriteString(truncate(line, m.width) + "\n")
+		}
+	}
+	hints := "[↑/↓] move  [Enter] select  [Q] quit"
+	if m.listLen() <= 9 {
+		hints += "  [1-6] jump"
+	}
+	b.WriteString(faintStyle.Render(hints))
+	if m.status != "" {
+		b.WriteString("\n" + accentStyle.Render(m.status))
+	}
+	return b.String()
+}
+
+func (m Model) viewTarget() string {
+	var b strings.Builder
+	switch m.action {
+	case ActionSSH:
 		b.WriteString(headerStyle.Render(fmt.Sprintf(" Select account for SSH shell (%d)", len(m.accounts))) + "\n")
-	} else {
-		b.WriteString(headerStyle.Render(fmt.Sprintf(" Select project to synchronize (%d)", len(m.projects))) + "\n")
+	case ActionRun:
+		b.WriteString(headerStyle.Render(fmt.Sprintf(" Select task to run (%d)", len(m.tasks))) + "\n")
+	default:
+		b.WriteString(headerStyle.Render(fmt.Sprintf(" Select project to %s (%d)", strings.ToLower(actionLabel(m.action)), len(m.projects))) + "\n")
 	}
 	maxRows := max(3, m.height-3)
-	if m.accountsView {
+	if m.action == ActionSSH {
 		for i, account := range m.accounts {
 			if i >= maxRows {
 				b.WriteString(faintStyle.Render(" …") + "\n")
@@ -174,7 +353,18 @@ func (m Model) View() string {
 			b.WriteString(m.renderAccount(i, account) + "\n")
 		}
 		if len(m.accounts) == 0 {
-			b.WriteString(faintStyle.Render("  no accounts — run godeploy --manage to add one") + "\n")
+			b.WriteString(faintStyle.Render("  no accounts — pick Manage to add one") + "\n")
+		}
+	} else if m.action == ActionRun {
+		for i, task := range m.tasks {
+			if i >= maxRows {
+				b.WriteString(faintStyle.Render(" …") + "\n")
+				break
+			}
+			b.WriteString(m.renderTask(i, task) + "\n")
+		}
+		if len(m.tasks) == 0 {
+			b.WriteString(faintStyle.Render("  no tasks — pick Manage to add one") + "\n")
 		}
 	} else {
 		for i, project := range m.projects {
@@ -185,14 +375,11 @@ func (m Model) View() string {
 			b.WriteString(m.renderProject(i, project) + "\n")
 		}
 		if len(m.projects) == 0 {
-			b.WriteString(faintStyle.Render("  no projects — switch to Accounts for a direct shell") + "\n")
+			b.WriteString(faintStyle.Render("  no projects — pick Manage to add one") + "\n")
 		}
 	}
-	hints := "[↑/↓] move  [Enter] synchronize  [T] shell account  [A/Tab] accounts  [Q] quit"
-	if m.accountsView {
-		hints = "[↑/↓] move  [Enter/T] open shell  [P/Tab] projects  [Q] quit"
-	}
-	if m.listLen() <= 9 {
+	hints := "[↑/↓] move  [Enter] select  [Esc] back  [Q] quit"
+	if m.listLen() <= 9 && m.listLen() > 0 {
 		hints += "  [1-9] jump"
 	}
 	b.WriteString(faintStyle.Render(hints))
@@ -210,6 +397,23 @@ func (m Model) renderProject(i int, project config.Project) string {
 	line := fmt.Sprintf("%s%-20s %-24s %-12s %s → %s",
 		marker, truncate(project.ID, 20), truncate(project.Name, 24), project.AccountID,
 		truncate(project.LocalRoot, 24), truncate(project.RemoteSummary(), 24))
+	if i == m.cursor {
+		return selectedStyle.Render(truncate(line, m.width))
+	}
+	return truncate(line, m.width)
+}
+
+func (m Model) renderTask(i int, task config.Task) string {
+	marker := "  "
+	if i == m.cursor {
+		marker = "▸ "
+	}
+	steps := "1 step"
+	if len(task.Steps) != 1 {
+		steps = fmt.Sprintf("%d steps", len(task.Steps))
+	}
+	line := fmt.Sprintf("%s%-20s %-24s %s",
+		marker, truncate(task.ID, 20), truncate(task.Name, 24), steps)
 	if i == m.cursor {
 		return selectedStyle.Render(truncate(line, m.width))
 	}

@@ -10,4 +10,5 @@ test:
 	go test ./...
 
 build:
-	go build -o godeploy ./cmd/godeploy
+	go build -o preflight ./cmd/preflight
+	ln -sf preflight pfl

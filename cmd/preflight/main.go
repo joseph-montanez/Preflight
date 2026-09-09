@@ -4,36 +4,59 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path"
 	"path/filepath"
 	"strings"
 	"sync"
 
-	"godeploy/internal/browser"
-	"godeploy/internal/config"
-	diffengine "godeploy/internal/diff"
-	"godeploy/internal/domain"
-	ignoreengine "godeploy/internal/ignore"
-	"godeploy/internal/localbrowser"
-	"godeploy/internal/manage"
-	"godeploy/internal/picker"
-	"godeploy/internal/remote"
-	"godeploy/internal/remotebrowser"
-	"godeploy/internal/syncer"
-	"godeploy/internal/tui"
+	"preflight/internal/browser"
+	"preflight/internal/config"
+	diffengine "preflight/internal/diff"
+	"preflight/internal/domain"
+	"preflight/internal/git"
+	ignoreengine "preflight/internal/ignore"
+	"preflight/internal/localbrowser"
+	"preflight/internal/manage"
+	"preflight/internal/picker"
+	"preflight/internal/remote"
+	"preflight/internal/remotebrowser"
+	"preflight/internal/syncer"
+	"preflight/internal/taskrun"
+	"preflight/internal/tui"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"golang.org/x/term"
 )
 
-// newProgram creates a tea program wired to the real terminal. The
-// input goes through keyboardInput, which translates CSI-u (kitty
-// keyboard protocol) sequences into the legacy escape forms bubbletea
-// v1.3.10 understands, so modifier keys and arrows work on terminals
-// that emit them.
-func newProgram(model tea.Model, opts ...tea.ProgramOption) *tea.Program {
-	return tea.NewProgram(model, append([]tea.ProgramOption{tea.WithInput(&keyboardInput{inner: os.Stdin})}, opts...)...)
+// runProgram creates and runs a tea program wired to the real terminal. The
+// input goes through keyboardInput, which translates CSI-u (kitty keyboard
+// protocol) sequences into the legacy escape forms bubbletea understands.
+// makeStdinRaw ensures os.Stdin is in raw mode and emits VT sequences.
+func runProgram(model tea.Model, opts ...tea.ProgramOption) (tea.Model, error) {
+	restore, err := makeStdinRaw()
+	if err != nil {
+		return nil, err
+	}
+	defer restore()
+
+	p := tea.NewProgram(model, append([]tea.ProgramOption{tea.WithInput(&keyboardInput{inner: os.Stdin})}, opts...)...)
+	return p.Run()
+}
+
+func makeStdinRaw() (func(), error) {
+	fd := int(os.Stdin.Fd())
+	if !term.IsTerminal(fd) {
+		return func() {}, nil
+	}
+	oldState, err := term.MakeRaw(fd)
+	if err != nil {
+		return nil, err
+	}
+	return func() {
+		_ = term.Restore(fd, oldState)
+	}, nil
 }
 
 // remoteFlow reports how the remote-browse flow ended, so the main loop
@@ -56,13 +79,15 @@ func main() {
 	remoteFlag := flag.Bool("remote", false, "browse the remote source and download files instead of syncing")
 	uploadFlag := flag.Bool("upload", false, "browse local files and upload them instead of syncing")
 	shellFlag := flag.Bool("shell", false, "open an interactive ssh shell into the project's account")
+	runFlag := flag.String("run", "", "run a saved task by id")
+	gitFlag := flag.Bool("git", false, "sync files changed in git status")
 	askpassFlag := flag.Bool("askpass", false, "internal: print the stored secret for ssh (used via SSH_ASKPASS)")
 	flag.Parse()
 
 	// -askpass, or an ssh askpass invocation: ssh spawns this binary with
 	// the prompt as a positional argument, so detect that shape too (the
 	// secret env var is only set by configureAskPass).
-	if *askpassFlag || (os.Getenv("GODEPLOY_ASKPASS_SECRET") != "" && len(flag.Args()) > 0) {
+	if *askpassFlag || (os.Getenv("PREFLIGHT_ASKPASS_SECRET") != "" && len(flag.Args()) > 0) {
 		askpassMode()
 		return
 	}
@@ -73,105 +98,157 @@ func main() {
 	if *shellFlag && (*remoteFlag || *uploadFlag) {
 		fatalIf(fmt.Errorf("-shell cannot be combined with -remote or -upload"))
 	}
+	if *gitFlag && *scope != "" {
+		fatalIf(fmt.Errorf("-git and -path are mutually exclusive"))
+	}
+	if *gitFlag && (*remoteFlag || *uploadFlag || *shellFlag) {
+		fatalIf(fmt.Errorf("-git cannot be combined with -remote, -upload, or -shell"))
+	}
+	if *runFlag != "" && (*projectID != "" || *scope != "" || *remoteFlag || *uploadFlag || *shellFlag || *gitFlag) {
+		fatalIf(fmt.Errorf("-run cannot be combined with -p, -path, -remote, -upload, -shell, or -git"))
+	}
 
 	if *manageMode {
 		cfg, err := config.LoadOrEmpty(*configPath)
 		fatalIf(err)
-		for {
-			model := manage.New(cfg, *configPath)
-			program := newProgram(model, tea.WithAltScreen())
-			final, err := program.Run()
-			fatalIf(err)
-			accountID := final.(manage.Model).ShellAccountID()
-			if accountID == "" {
-				return
-			}
-			account, err := cfg.Account(accountID)
-			fatalIf(err)
-			secrets, err := config.LoadSecrets(config.SecretsPath(*configPath))
-			fatalIf(err)
-			fatalIf(openShell(*account, secrets))
-			// Return to the manager after the SSH session exits so another
-			// account can be edited or opened without restarting godeploy.
-		}
+		runManageLoop(cfg, *configPath)
+		return
 	}
 
-	cfg, err := config.Load(*configPath)
+	cfg, err := config.LoadOrEmpty(*configPath)
 	fatalIf(err)
+	fatalIf(cfg.ValidateTasks())
 	secrets, err := config.LoadSecrets(config.SecretsPath(*configPath))
 	fatalIf(err)
-	if *projectID == "" {
-		if len(cfg.Projects) == 0 && len(cfg.Accounts) == 0 {
-			fmt.Fprintln(os.Stderr, "No projects or accounts defined. Run: godeploy -manage to add one")
-			return
-		}
-		for *projectID == "" {
-			picked, shellAccountID, err := pickTarget(cfg.Projects, cfg.Accounts)
-			fatalIf(err)
-			switch {
-			case shellAccountID != "":
-				account, err := cfg.Account(shellAccountID)
-				fatalIf(err)
-				fatalIf(openShell(*account, secrets))
-				// A direct shell returns to the project/account picker.
-				continue
-			case picked == "":
-				fmt.Fprintln(os.Stderr, "no project or account selected")
-				return
-			default:
-				*projectID = picked
-			}
-		}
-	}
-	project, err := cfg.Project(*projectID)
-	fatalIf(err)
-	fatalIf(project.ValidatePathMappings())
 
-	// Loop so the review TUI can send us back: r = re-run the project
-	// flow (picker again), b = re-browse folders for the same project,
-	// and the remote browser can return to the folder selection.
+	// Direct task entry: run and exit without touching the launcher.
+	if *runFlag != "" {
+		task, err := cfg.Task(*runFlag)
+		fatalIf(err)
+		fatalIf(runTaskFlow(cfg, secrets, *task, os.Stderr))
+		return
+	}
+
+	forcedAction, hasForced := actionFromFlags(*remoteFlag, *uploadFlag, *shellFlag)
+
+	// The launcher action drives the project flow below: sync runs the
+	// scope picker + compare/review, while upload/download skip straight
+	// to their browsers. -p with mode flags selects the action directly;
+	// otherwise the launcher picks it.
+	launcherAction := picker.ActionSync
+	if hasForced {
+		launcherAction = forcedAction
+	}
+	var project *config.Project
+	if *projectID != "" {
+		var err error
+		project, err = cfg.Project(*projectID)
+		fatalIf(err)
+		fatalIf(project.ValidatePathMappings())
+	}
+
+	// Loop so the review TUI can send us back: r = back to the launcher,
+	// b = re-browse folders for the same project, and the remote browser
+	// can return to the folder selection.
 	skipProjectPick := false
 	var lastMarks []string // sync-browser marks restored after editor detours
 	for {
 		if *projectID == "" && !skipProjectPick {
-			picked, shellAccountID, err := pickTarget(cfg.Projects, cfg.Accounts)
+			// Action-first launcher: pick what to do, then the filtered
+			// target. SSH and Manage run here and return to the
+			// launcher; a project choice drops into the flow below.
+			// [r] from a review flow clears the project and returns here.
+			if len(cfg.Projects) == 0 && len(cfg.Accounts) == 0 {
+				fmt.Fprintln(os.Stderr, "No projects or accounts defined. Pick Manage to add one")
+			}
+			act, pid, aid, tid, ok, err := pickLauncher(cfg.Projects, cfg.Accounts, cfg.Tasks, forcedAction, hasForced)
 			fatalIf(err)
-			if shellAccountID != "" {
-				account, err := cfg.Account(shellAccountID)
+			if !ok {
+				return
+			}
+			switch act {
+			case picker.ActionManage:
+				runManageLoop(cfg, *configPath)
+				// The manager writes on save, so re-read before
+				// showing the launcher again.
+				cfg, err = config.LoadOrEmpty(*configPath)
+				fatalIf(err)
+				fatalIf(cfg.ValidateTasks())
+				secrets, err = config.LoadSecrets(config.SecretsPath(*configPath))
+				fatalIf(err)
+				continue
+			case picker.ActionSSH:
+				account, err := cfg.Account(aid)
 				fatalIf(err)
 				fatalIf(openShell(*account, secrets))
 				continue
+			case picker.ActionRun:
+				task, err := cfg.Task(tid)
+				fatalIf(err)
+				fatalIf(runTaskFlow(cfg, secrets, *task, os.Stderr))
+				continue
+			default:
+				*projectID = pid
+				launcherAction = act
+				project, err = cfg.Project(pid)
+				fatalIf(err)
+				fatalIf(project.ValidatePathMappings())
 			}
-			if picked == "" {
-				return
-			}
-			project, err = cfg.Project(picked)
-			fatalIf(err)
 		}
 		skipProjectPick = false
 
 		// Without an explicit -path, let the user pick the sync scopes from
 		// the local file system BEFORE any connection or scan happens. The
-		// folder browser also offers r = browse the remote source instead,
-		// u = browse local files for upload instead, t = ssh shell, and
-		// e = open the configured editor on the entry under the cursor.
-		remoteBrowse := *remoteFlag
-		localUpload := *uploadFlag
-		openShellMode := *shellFlag
+		// folder browser also offers e = open the configured editor on the
+		// entry under the cursor; upload, download, and shell are chosen
+		// up front in the launcher instead.
+		// The flow comes from the launcher action (-p seeds it from the
+		// mode flags), so a stale mode flag can never leak into an
+		// explicitly picked action (e.g. -remote, then Esc to Sync).
+		remoteBrowse := launcherAction == picker.ActionDownload
+		localUpload := launcherAction == picker.ActionUpload
+		openShellMode := launcherAction == picker.ActionSSH
 		openEditorMode := false
 		editTarget := ""
 		var syncScopes []string
 		if *scope != "" {
 			syncScopes = []string{*scope}
+		} else if *gitFlag && !remoteBrowse && !localUpload && !openShellMode {
+			gitPaths, err := git.ChangedPaths(project.LocalRoot, project.Exclusions)
+			fatalIf(err)
+			if len(gitPaths) == 0 {
+				fmt.Fprintln(os.Stderr, "preflight: git working tree clean, nothing to sync")
+				return
+			}
+			mappings := project.EffectivePathMappings()
+			var mapped []string
+			for _, p := range gitPaths {
+				if config.IsMappingCovered(p, false, mappings) {
+					mapped = append(mapped, p)
+				}
+			}
+			if len(mapped) == 0 {
+				fmt.Fprintln(os.Stderr, "preflight: git working tree has no changes in mapped folders")
+				return
+			}
+			syncScopes = mapped
 		} else if !remoteBrowse && !localUpload && !openShellMode {
-			picked, browse, upload, shell, edit, target, marks, ok, err := browseProject(project.LocalRoot, cfg.Editor, lastMarks)
+			initialMarks := lastMarks
+			mappings := project.EffectivePathMappings()
+			if project.GitStatus && len(initialMarks) == 0 {
+				if gitPaths, err := git.ChangedPaths(project.LocalRoot, project.Exclusions); err == nil {
+					for _, p := range gitPaths {
+						if config.IsMappingCovered(p, false, mappings) {
+							initialMarks = append(initialMarks, p)
+						}
+					}
+				}
+			}
+			picked, edit, target, marks, ok, err := browseProject(project.LocalRoot, cfg.Editor, project.Exclusions, mappings, initialMarks)
 			fatalIf(err)
 			if !ok {
 				return
 			}
-			remoteBrowse = browse
-			localUpload = upload
-			openShellMode = shell
 			openEditorMode = edit
 			editTarget = target
 			lastMarks = marks
@@ -195,6 +272,8 @@ func main() {
 				skipProjectPick = true
 				continue
 			case remoteContinueOuter:
+				// [r]: back to the launcher.
+				*projectID = ""
 				continue
 			}
 		}
@@ -207,16 +286,18 @@ func main() {
 				skipProjectPick = true
 				continue
 			case remoteContinueOuter:
+				// [r]: back to the launcher.
+				*projectID = ""
 				continue
 			}
 		}
 
 		if openShellMode {
+			// Only reachable via -p with -shell: shell into the
+			// project's account, then back to its folder browser.
 			if err := openShell(*account, secrets); err != nil {
 				fatalIf(err)
 			}
-			// Back to the folder browser for the same project, so the shell
-			// acts like the other alternate modes: [T] again, or pick scopes.
 			skipProjectPick = true
 			continue
 		}
@@ -294,15 +375,19 @@ func main() {
 			return planner.Build()
 		}
 		model := tui.New(project.Name, project.RemoteSummary(), strings.ToUpper(account.Protocol)+" "+account.ID, domain.DiffMode(project.DefaultDiffMode), build, execute, sink, ignore).WithDiffLoader(planner.LoadTextDiff)
-		program := newProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion())
-		final, err := program.Run()
+		final, err := runProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion())
 		fatalIf(err)
 		for _, c := range clients {
 			_ = c.Close()
 		}
 
 		f := final.(tui.Model)
-		if f.GoBack() || f.ReBrowse() {
+		if f.ReBrowse() {
+			continue
+		}
+		if f.GoBack() {
+			// [r] after a deploy: back to the launcher.
+			*projectID = ""
 			continue
 		}
 		break
@@ -330,8 +415,7 @@ func runRemoteBrowse(project config.Project, account config.Account, prompt remo
 		// 1. Browse the remote source.
 		model := remotebrowser.New(client, project.EffectivePathMappings(), project.LocalRoot, editorCmd)
 		model.RestoreMarks(marks)
-		program := newProgram(model, tea.WithAltScreen())
-		final, err := program.Run()
+		final, err := runProgram(model, tea.WithAltScreen())
 		fatalIf(err)
 		b := final.(remotebrowser.Model)
 		if editPath := b.EditRequest(); editPath != "" {
@@ -399,8 +483,7 @@ func runRemoteBrowse(project config.Project, account config.Account, prompt remo
 			return executor.Execute(ctx, items)
 		}
 		model2 := tui.New(project.Name, project.RemoteSummary(), strings.ToUpper(account.Protocol)+" "+account.ID, "", build, execute, sink, nil, tui.TransferDownload)
-		program2 := newProgram(model2, tea.WithAltScreen(), tea.WithMouseCellMotion())
-		final2, err := program2.Run()
+		final2, err := runProgram(model2, tea.WithAltScreen(), tea.WithMouseCellMotion())
 		fatalIf(err)
 		f := final2.(tui.Model)
 		if f.ReBrowse() {
@@ -493,8 +576,7 @@ func runLocalUpload(project config.Project, account config.Account, prompt remot
 		// 1. Browse local files.
 		model := localbrowser.New(project.LocalRoot, mappings, ignores, editorCmd)
 		model.RestoreMarks(marks)
-		program := newProgram(model, tea.WithAltScreen())
-		final, err := program.Run()
+		final, err := runProgram(model, tea.WithAltScreen())
 		fatalIf(err)
 		b := final.(localbrowser.Model)
 		if editPath := b.EditRequest(); editPath != "" {
@@ -548,8 +630,7 @@ func runLocalUpload(project config.Project, account config.Account, prompt remot
 			return executor.Execute(ctx, items)
 		}
 		model2 := tui.New(project.Name, project.RemoteSummary(), strings.ToUpper(account.Protocol)+" "+account.ID, "", build, execute, sink, nil, tui.TransferUpload)
-		program2 := newProgram(model2, tea.WithAltScreen(), tea.WithMouseCellMotion())
-		final2, err := program2.Run()
+		final2, err := runProgram(model2, tea.WithAltScreen(), tea.WithMouseCellMotion())
 		fatalIf(err)
 		f := final2.(tui.Model)
 		if f.ReBrowse() {
@@ -566,8 +647,7 @@ func runLocalUpload(project config.Project, account config.Account, prompt remot
 // and returns the absolute destination folder the user chose.
 func pickRemoteDestination(client domain.RemoteClient) (string, bool, error) {
 	model := remotebrowser.PickRemoteDir(client, "/")
-	program := newProgram(model, tea.WithAltScreen())
-	final, err := program.Run()
+	final, err := runProgram(model, tea.WithAltScreen())
 	if err != nil {
 		return "", false, err
 	}
@@ -661,41 +741,30 @@ func buildUploadItems(localRoot string, mappings []config.PathMapping, roots []l
 
 // browseProject runs the local folder browser TUI and returns the chosen
 // scopes (relative to the project root; an empty list = full project),
-// whether the user asked to browse the remote source, upload local
-// files, open a shell, or open the editor instead, the editor target,
+// whether the user asked to open the editor instead, the editor target,
 // the marked set (for restoration after editor detours), and whether
-// the user actually picked something.
-func browseProject(localRoot, editorCmd string, restoreMarks []string) (scopes []string, remoteBrowse, localUpload, shellMode, editorMode bool, editTarget string, marks []string, ok bool, err error) {
-	model := browser.New(localRoot, editorCmd)
+// the user actually picked something. Upload, download, and shell are
+// chosen up front in the launcher, not here.
+func browseProject(localRoot, editorCmd string, exclusions []string, mappings []config.PathMapping, restoreMarks []string) (scopes []string, editorMode bool, editTarget string, marks []string, ok bool, err error) {
+	model := browser.New(localRoot, editorCmd).WithExclusions(exclusions).WithMappings(mappings)
 	model.RestoreMarks(restoreMarks)
-	program := newProgram(model, tea.WithAltScreen())
-	final, err := program.Run()
+	final, err := runProgram(model, tea.WithAltScreen())
 	if err != nil {
-		return nil, false, false, false, false, "", nil, false, err
+		return nil, false, "", nil, false, err
 	}
 	b := final.(browser.Model)
-	if b.RemoteBrowse() {
-		return nil, true, false, false, false, "", b.MarkedPaths(), true, nil
-	}
-	if b.LocalUpload() {
-		return nil, false, true, false, false, "", b.MarkedPaths(), true, nil
-	}
-	if b.ShellMode() {
-		return nil, false, false, true, false, "", b.MarkedPaths(), true, nil
-	}
 	if b.EditorMode() {
-		return nil, false, false, false, true, b.EditTarget(), b.MarkedPaths(), true, nil
+		return nil, true, b.EditTarget(), b.MarkedPaths(), true, nil
 	}
 	scopes, ok = b.Selected()
-	return scopes, false, false, false, false, "", b.MarkedPaths(), ok, nil
+	return scopes, false, "", b.MarkedPaths(), ok, nil
 }
 
 // pickDestination runs the folder browser in directory mode and returns
 // the absolute destination folder the user chose.
 func pickDestination(root string) (string, bool, error) {
 	model := browser.PickDir(root)
-	program := newProgram(model, tea.WithAltScreen())
-	final, err := program.Run()
+	final, err := runProgram(model, tea.WithAltScreen())
 	if err != nil {
 		return "", false, err
 	}
@@ -707,17 +776,132 @@ func pickDestination(root string) (string, bool, error) {
 	return sel[0], true, nil
 }
 
-// pickTarget runs the startup picker. It returns either a project to
-// synchronize or an account to open directly in an SSH shell.
-func pickTarget(projects []config.Project, accounts []config.Account) (projectID, accountID string, err error) {
-	model := picker.New(projects, accounts)
-	program := newProgram(model, tea.WithAltScreen())
-	final, err := program.Run()
+// actionFromFlags maps CLI mode flags to the launcher action. -p with no
+// mode flag defaults to sync at the call site.
+func actionFromFlags(remote, upload, shell bool) (picker.Action, bool) {
+	switch {
+	case remote:
+		return picker.ActionDownload, true
+	case upload:
+		return picker.ActionUpload, true
+	case shell:
+		return picker.ActionSSH, true
+	default:
+		return "", false
+	}
+}
+
+// pickLauncher runs the startup launcher. With hasForced (a mode flag given
+// without -p) it skips the action menu and picks only the filtered target;
+// otherwise it shows the full action-first menu. The task ID is set only
+// for the run action.
+func pickLauncher(projects []config.Project, accounts []config.Account, tasks []config.Task, forced picker.Action, hasForced bool) (picker.Action, string, string, string, bool, error) {
+	if hasForced {
+		return pickTargetForAction(projects, accounts, tasks, forced)
+	}
+	return pickActionTarget(projects, accounts, tasks)
+}
+
+// pickActionTarget runs the full action-first launcher: an action menu
+// followed by the filtered target list. It returns the action plus the
+// chosen project, account, or task ID.
+func pickActionTarget(projects []config.Project, accounts []config.Account, tasks []config.Task) (picker.Action, string, string, string, bool, error) {
+	model := picker.New(projects, accounts, tasks)
+	final, err := runProgram(model, tea.WithAltScreen())
 	if err != nil {
-		return "", "", err
+		return "", "", "", "", false, err
 	}
 	picked := final.(picker.Model)
-	return picked.Selected(), picked.SelectedAccount(), nil
+	return unpackLauncherPick(picked)
+}
+
+// pickTargetForAction runs the launcher directly on the filtered target
+// step for a forced action (a mode flag without -p). Esc backs out to the
+// full action menu, so the result is unpacked the same way.
+func pickTargetForAction(projects []config.Project, accounts []config.Account, tasks []config.Task, action picker.Action) (picker.Action, string, string, string, bool, error) {
+	model := picker.NewForAction(projects, accounts, tasks, action)
+	final, err := runProgram(model, tea.WithAltScreen())
+	if err != nil {
+		return "", "", "", "", false, err
+	}
+	return unpackLauncherPick(final.(picker.Model))
+}
+
+// unpackLauncherPick converts a finished launcher model into the action
+// plus the chosen project, account, or task ID. ok is false when the user
+// quit without confirming a choice.
+func unpackLauncherPick(picked picker.Model) (picker.Action, string, string, string, bool, error) {
+	act := picked.SelectedAction()
+	switch act {
+	case "":
+		return "", "", "", "", false, nil
+	case picker.ActionManage:
+		return act, "", "", "", true, nil
+	case picker.ActionSSH:
+		if picked.SelectedAccount() == "" {
+			return "", "", "", "", false, nil
+		}
+		return act, "", picked.SelectedAccount(), "", true, nil
+	case picker.ActionRun:
+		if picked.SelectedTask() == "" {
+			return "", "", "", "", false, nil
+		}
+		return act, "", "", picked.SelectedTask(), true, nil
+	default:
+		if picked.Selected() == "" {
+			return "", "", "", "", false, nil
+		}
+		return act, picked.Selected(), "", "", true, nil
+	}
+}
+
+// runTaskFlow executes a saved task, streaming step headers and command
+// output to out. Connections open lazily per account through the same
+// secret prompt as sync flows.
+func runTaskFlow(cfg *config.Config, secrets *config.Secrets, task config.Task, out io.Writer) error {
+	lookup := func(id string) (config.Account, error) {
+		account, err := cfg.Account(id)
+		if err != nil {
+			return config.Account{}, err
+		}
+		return *account, nil
+	}
+	connect := func(account config.Account) (domain.RemoteClient, error) {
+		fmt.Fprintf(out, "Connecting to %s...\n", account.Name)
+		client, err := remote.NewClient(account, cachedPrompt(promptFor(account.ID, secrets)))
+		if err != nil {
+			return nil, err
+		}
+		if err := client.Connect(); err != nil {
+			return nil, err
+		}
+		return client, nil
+	}
+	_, err := taskrun.Run(task, lookup, connect, out)
+	return err
+}
+
+// runManageLoop runs the interactive config manager until it quits. A T on
+// an SFTP account shells out and returns to the manager when the shell
+// exits. The manager writes on save, so callers re-read the config after
+// it returns.
+func runManageLoop(cfg *config.Config, configPath string) {
+	for {
+		model := manage.New(cfg, configPath)
+		final, err := runProgram(model, tea.WithAltScreen())
+		fatalIf(err)
+		accountID := final.(manage.Model).ShellAccountID()
+		if accountID == "" {
+			return
+		}
+		account, err := cfg.Account(accountID)
+		fatalIf(err)
+		secrets, err := config.LoadSecrets(config.SecretsPath(configPath))
+		fatalIf(err)
+		fatalIf(openShell(*account, secrets))
+		// Return to the manager after the SSH session exits so another
+		// account can be edited or opened without restarting preflight.
+	}
 }
 
 // cachedPrompt wraps a SecretPrompt so each label is resolved once and
@@ -781,7 +965,7 @@ func validateScope(scope string) error {
 
 func fatalIf(err error) {
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "godeploy:", err)
+		fmt.Fprintln(os.Stderr, "preflight:", err)
 		os.Exit(1)
 	}
 }

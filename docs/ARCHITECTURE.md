@@ -35,7 +35,7 @@ TUI
 1. Execute explicitly selected deletions first.
 2. Ensure destination directories exist.
 3. Execute upload/download transfers with the configured worker count.
-4. Write transfers to `.godeploy-tmp` staging files when rename is available.
+4. Write transfers to `.preflight-tmp` staging files when rename is available.
 5. Rename staging files over their destination.
 6. Preserve modification time where supported.
 
@@ -43,8 +43,8 @@ FTP/FTPS operations are serialized on a single control connection. SFTP transfer
 
 ## TUI milestones
 
-- Interactive account manager (done — `internal/manage`, launch with `-manage`).
-- Project picker (done — `internal/picker`; running without `-p` opens it).
+- Interactive account manager (done — `internal/manage`, launch with `-manage` or the launcher Manage action).
+- Startup launcher (done — `internal/picker`; running without `-p` opens the action-first menu).
 - Scope tree browser (done — `internal/browser`; pre-scan folder picker; the review `c` shortcut still just suggests a restart).
 - Scan progress + scrolling/filtered review list (done — `internal/tui`: live stage/count progress, pending-only filter with `f`, paged scrolling, mouse wheel).
 - Diff-mode/options modal for the `m` shortcut.

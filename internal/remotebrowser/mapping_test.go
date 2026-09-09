@@ -4,7 +4,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"godeploy/internal/config"
+	"preflight/internal/config"
 )
 
 func TestResolveLocalPath(t *testing.T) {

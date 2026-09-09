@@ -67,7 +67,7 @@ func editorHelperPath() string {
 }
 
 func TestEditorHelperProcess(t *testing.T) {
-	out := os.Getenv("GODEPLOY_EDITOR_HELPER_OUT")
+	out := os.Getenv("PREFLIGHT_EDITOR_HELPER_OUT")
 	if out == "" {
 		return
 	}
@@ -92,7 +92,7 @@ func TestOpenEditorRunsCommand(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "notes.txt")
 	out := filepath.Join(dir, "out.txt")
-	t.Setenv("GODEPLOY_EDITOR_HELPER_OUT", out)
+	t.Setenv("PREFLIGHT_EDITOR_HELPER_OUT", out)
 	if err := openEditor(editorHelperPath(), target, dir); err != nil {
 		t.Fatalf("openEditor: %v", err)
 	}

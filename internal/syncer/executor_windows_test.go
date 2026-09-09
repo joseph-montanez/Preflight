@@ -12,7 +12,7 @@ import (
 
 func TestReplaceDownloadedFileFallsBackWhenDestinationDeniesDeleteSharing(t *testing.T) {
 	dir := t.TempDir()
-	tmpPath := filepath.Join(dir, "server.log.godeploy-tmp")
+	tmpPath := filepath.Join(dir, "server.log.preflight-tmp")
 	targetPath := filepath.Join(dir, "server.log")
 	want := []byte("downloaded log snapshot")
 	if err := os.WriteFile(tmpPath, want, 0o644); err != nil {

@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
-	"godeploy/internal/config"
-	diffengine "godeploy/internal/diff"
-	"godeploy/internal/domain"
+	"preflight/internal/config"
+	diffengine "preflight/internal/diff"
+	"preflight/internal/domain"
 )
 
 // memClient is an in-memory RemoteClient that can simulate servers which
@@ -159,7 +159,7 @@ func TestUploadRenameRefusedFallsBackToDirectWrite(t *testing.T) {
 	if got := string(client.files["/srv/file.txt"]); got != content {
 		t.Fatalf("remote content = %q, want %q", got, content)
 	}
-	if _, ok := client.files["/srv/file.txt.godeploy-tmp"]; ok {
+	if _, ok := client.files["/srv/file.txt.preflight-tmp"]; ok {
 		t.Fatal("tmp file should be removed after fallback")
 	}
 	if client.renames != 1 || client.times != 1 {

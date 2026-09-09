@@ -4,9 +4,10 @@ import (
 	"strings"
 	"testing"
 
-	"godeploy/internal/domain"
+	"preflight/internal/domain"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 )
 
 const sampleUnifiedDiff = `--- /remote/main.go
@@ -21,7 +22,7 @@ const sampleUnifiedDiff = `--- /remote/main.go
 `
 
 func TestParseUnifiedDiffAlignsRemoteAndLocalChanges(t *testing.T) {
-	rows := parseUnifiedDiff(sampleUnifiedDiff)
+	rows, sections := parseUnifiedDiff(sampleUnifiedDiff)
 	if len(rows) != 6 {
 		t.Fatalf("rows = %d, want 6", len(rows))
 	}
@@ -39,6 +40,93 @@ func TestParseUnifiedDiffAlignsRemoteAndLocalChanges(t *testing.T) {
 	}
 	if rows[5].oldNumber != 4 || rows[5].newNumber != 5 {
 		t.Fatalf("trailing context line numbers = %d/%d, want 4/5", rows[5].oldNumber, rows[5].newNumber)
+	}
+
+	if len(sections) != 1 {
+		t.Fatalf("sections = %d, want 1", len(sections))
+	}
+	sec := sections[0]
+	if sec.LocalStartLine != 2 || sec.LocalLineCount != 2 {
+		t.Fatalf("sec local lines = %d:%d, want 2:2", sec.LocalStartLine, sec.LocalLineCount)
+	}
+	if sec.RemoteStartLine != 2 || sec.RemoteLineCount != 1 {
+		t.Fatalf("sec remote lines = %d:%d, want 2:1", sec.RemoteStartLine, sec.RemoteLineCount)
+	}
+	if len(sec.RemoteLines) != 1 || sec.RemoteLines[0] != `func message() string { return "old" }` {
+		t.Fatalf("unexpected remote lines: %#v", sec.RemoteLines)
+	}
+}
+
+func TestRenderSplitDiffEmbedsPullButton(t *testing.T) {
+	rendered := renderSplitDiff("main.go", "edits detected", sampleUnifiedDiff, 100, true)
+	if !strings.Contains(rendered, "[→]") {
+		t.Fatalf("rendered diff missing [→] button:\n%s", rendered)
+	}
+}
+
+func TestWrapLine(t *testing.T) {
+	longLine := "func TestSomething(paramA string, paramB int, paramC bool) (string, error) { return \"ok\", nil }"
+	chunks := wrapLine(longLine, 30)
+	if len(chunks) < 3 {
+		t.Fatalf("expected at least 3 chunks, got %d: %#v", len(chunks), chunks)
+	}
+	for i, chunk := range chunks {
+		if lipgloss.Width(chunk) > 30 {
+			t.Fatalf("chunk %d width = %d > 30: %q", i, lipgloss.Width(chunk), chunk)
+		}
+	}
+
+	line14 := "        'UPDATE transactions SET transactions_notes = CONCAT(transactions_notes, ?) WHERE transactions_id = ?',"
+	chunks14 := wrapLine(line14, 109)
+	if len(chunks14) != 2 {
+		t.Fatalf("expected 2 chunks for line 14 at width 109, got %d: %#v", len(chunks14), chunks14)
+	}
+}
+
+func TestReproduceLine14(t *testing.T) {
+	diffContent := "@@ -1,11 +1,16 @@\n" +
+		" }\n" +
+		"+function overdue_final($db, $transactions_id, $reason) {\n" +
+		"+    $db->query(\n" +
+		"+        'UPDATE transactions SET transactions_notes = CONCAT(transactions_notes, ?) WHERE transactions_id = ?',\n" +
+		"+        array(' | overdue_final:' . $reason, $transactions_id)\n" +
+		"+    );\n"
+	rendered := renderSplitDiff("test.php", "test", diffContent, 235, true)
+	lines := strings.Split(rendered, "\n")
+	if len(lines) != 12 {
+		t.Fatalf("expected exactly 12 lines, got %d", len(lines))
+	}
+	// Line 8 is the first wrapped line, Line 9 is the second wrapped line (continuation)
+	if !strings.Contains(lines[8], "WHERE transactions_id =") {
+		t.Errorf("line 8 should contain first part of UPDATE query: %q", lines[8])
+	}
+	if !strings.Contains(lines[9], "?',") {
+		t.Errorf("line 9 should contain continuation: %q", lines[9])
+	}
+	if !strings.Contains(lines[10], "array(' | overdue_final:'") {
+		t.Errorf("line 10 should be the next line (array): %q", lines[10])
+	}
+}
+
+func TestRenderSplitDiffWordWrapAligned(t *testing.T) {
+	diffWithLongLine := `--- /remote/main.go
++++ /local/main.go
+@@ -1,2 +1,2 @@
+-func Short() {}
++func VeryLongFunctionWithManyArguments(firstArgument string, secondArgument int, thirdArgument bool) (result string, err error) {}
+`
+	rendered := renderSplitDiff("main.go", "1 edit", diffWithLongLine, 80, true)
+	if strings.Contains(rendered, "…") {
+		t.Fatalf("rendered diff with wrap=true should not contain ellipsis truncation:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "VeryLongFunction") {
+		t.Fatalf("rendered diff should contain function name:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "uments") {
+		t.Fatalf("rendered diff should contain wrapped function name continuation:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "thirdArgument") {
+		t.Fatalf("rendered diff should contain wrapped arguments:\n%s", rendered)
 	}
 }
 

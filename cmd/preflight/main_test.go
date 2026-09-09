@@ -9,11 +9,11 @@ import (
 	"testing"
 	"time"
 
-	"godeploy/internal/config"
-	"godeploy/internal/domain"
-	ignoreengine "godeploy/internal/ignore"
-	"godeploy/internal/localbrowser"
-	"godeploy/internal/remotebrowser"
+	"preflight/internal/config"
+	"preflight/internal/domain"
+	ignoreengine "preflight/internal/ignore"
+	"preflight/internal/localbrowser"
+	"preflight/internal/remotebrowser"
 )
 
 // fakeDownloadClient serves a static tree for buildDownloadItems tests.
@@ -323,3 +323,20 @@ func TestBuildUploadItemsProgress(t *testing.T) {
 		t.Fatalf("stages = %v", stages)
 	}
 }
+
+func TestValidateScope(t *testing.T) {
+	valid := []string{"src", "src/main.go", "a/b/c.txt", "file.php"}
+	for _, s := range valid {
+		if err := validateScope(s); err != nil {
+			t.Errorf("validateScope(%q) unexpectedly failed: %v", s, err)
+		}
+	}
+
+	invalid := []string{"/root", "../parent", "a/../b", ".."}
+	for _, s := range invalid {
+		if err := validateScope(s); err == nil {
+			t.Errorf("validateScope(%q) should have failed", s)
+		}
+	}
+}
+

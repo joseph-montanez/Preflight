@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"godeploy/internal/domain"
+	"preflight/internal/domain"
 )
 
 // editFakeClient is a RemoteClient that serves a single remote file and
@@ -92,15 +92,15 @@ func remoteEditorHelperPath() string {
 // TestRemoteEditorHelperProcess is the editor stand-in for
 // openRemoteEdit tests. Env contract:
 //
-//	GODEPLOY_EDITOR_SCRIPT      content|sleepSecs|exitCode  (required)
-//	GODEPLOY_EDITOR_TARGET_FILE file to record the temp path in
-//	GODEPLOY_EDITOR_DONE_FILE   marker written just before exiting
+//	PREFLIGHT_EDITOR_SCRIPT      content|sleepSecs|exitCode  (required)
+//	PREFLIGHT_EDITOR_TARGET_FILE file to record the temp path in
+//	PREFLIGHT_EDITOR_DONE_FILE   marker written just before exiting
 //
 // It overwrites the target file (last argv) with content, optionally
 // sleeps (holding the "editor session" open so the save-watcher can
 // fire), records its target, writes the done marker, then exits.
 func TestRemoteEditorHelperProcess(t *testing.T) {
-	script := os.Getenv("GODEPLOY_EDITOR_SCRIPT")
+	script := os.Getenv("PREFLIGHT_EDITOR_SCRIPT")
 	if script == "" {
 		return
 	}
@@ -112,13 +112,13 @@ func TestRemoteEditorHelperProcess(t *testing.T) {
 	if err := os.WriteFile(target, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if out := os.Getenv("GODEPLOY_EDITOR_TARGET_FILE"); out != "" {
+	if out := os.Getenv("PREFLIGHT_EDITOR_TARGET_FILE"); out != "" {
 		_ = os.WriteFile(out, []byte(target), 0o644)
 	}
 	if sleepSecs > 0 {
 		time.Sleep(time.Duration(sleepSecs) * time.Second)
 	}
-	if done := os.Getenv("GODEPLOY_EDITOR_DONE_FILE"); done != "" {
+	if done := os.Getenv("PREFLIGHT_EDITOR_DONE_FILE"); done != "" {
 		_ = os.WriteFile(done, []byte("done"), 0o644)
 	}
 	os.Exit(exitCode)
@@ -149,9 +149,9 @@ func TestOpenRemoteEditUploadsOnSave(t *testing.T) {
 	targetFile := filepath.Join(dir, "target.txt")
 	// The editor writes the edit, holds the session open for 3 s, then
 	// exits 0. The upload must arrive while the editor is still running.
-	t.Setenv("GODEPLOY_EDITOR_SCRIPT", "edited content|3|0")
-	t.Setenv("GODEPLOY_EDITOR_TARGET_FILE", targetFile)
-	t.Setenv("GODEPLOY_EDITOR_DONE_FILE", doneFile)
+	t.Setenv("PREFLIGHT_EDITOR_SCRIPT", "edited content|3|0")
+	t.Setenv("PREFLIGHT_EDITOR_TARGET_FILE", targetFile)
+	t.Setenv("PREFLIGHT_EDITOR_DONE_FILE", doneFile)
 
 	factory := func() (domain.RemoteClient, error) { return fake, nil }
 	err := openRemoteEdit(fake, factory, remoteEditorHelperPath(), "/remote/config.php")
@@ -204,7 +204,7 @@ func TestOpenRemoteEditFinalUploadOnExit(t *testing.T) {
 	defer func() { saveTick = oldTick }()
 
 	fake := newEditFakeClient("original")
-	t.Setenv("GODEPLOY_EDITOR_SCRIPT", "final version|0|0")
+	t.Setenv("PREFLIGHT_EDITOR_SCRIPT", "final version|0|0")
 	factory := func() (domain.RemoteClient, error) { return fake, nil }
 	if err := openRemoteEdit(fake, factory, remoteEditorHelperPath(), "/remote/x.txt"); err != nil {
 		t.Fatalf("openRemoteEdit: %v", err)
@@ -220,7 +220,7 @@ func TestOpenRemoteEditUnchangedNoUpload(t *testing.T) {
 	defer func() { saveTick = oldTick }()
 
 	fake := newEditFakeClient("same")
-	t.Setenv("GODEPLOY_EDITOR_SCRIPT", "same|0|0") // editor leaves content unchanged
+	t.Setenv("PREFLIGHT_EDITOR_SCRIPT", "same|0|0") // editor leaves content unchanged
 	factory := func() (domain.RemoteClient, error) { return fake, nil }
 	if err := openRemoteEdit(fake, factory, remoteEditorHelperPath(), "/remote/x.txt"); err != nil {
 		t.Fatalf("openRemoteEdit: %v", err)
@@ -238,8 +238,8 @@ func TestOpenRemoteEditFailedEditorKeepsTemp(t *testing.T) {
 	fake := newEditFakeClient("original")
 	dir := t.TempDir()
 	targetFile := filepath.Join(dir, "target.txt")
-	t.Setenv("GODEPLOY_EDITOR_SCRIPT", "broken edit|0|7") // exit code 7
-	t.Setenv("GODEPLOY_EDITOR_TARGET_FILE", targetFile)
+	t.Setenv("PREFLIGHT_EDITOR_SCRIPT", "broken edit|0|7") // exit code 7
+	t.Setenv("PREFLIGHT_EDITOR_TARGET_FILE", targetFile)
 	factory := func() (domain.RemoteClient, error) { return fake, nil }
 	err := openRemoteEdit(fake, factory, remoteEditorHelperPath(), "/remote/x.txt")
 	if err == nil {

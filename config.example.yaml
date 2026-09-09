@@ -25,7 +25,7 @@ accounts:
     auth:
       type: "password"
       username: "deploy"
-      password_env: "GODEPLOY_FTP_PASSWORD"
+      password_env: "PREFLIGHT_FTP_PASSWORD"
 
 projects:
   - id: "api-backend"
@@ -48,3 +48,18 @@ projects:
       - "node_modules/"
       - "vendor/"
       - "storage/logs/*.log"
+
+# Named multi-step remote command tasks (run configurations). Pick Run in
+# the launcher or run `preflight -run <id>`. Steps run in order over SFTP
+# accounts (FTP has no shell); workdir is entered with cd before run, and a
+# failing step stops the run unless on_error is "continue".
+tasks:
+  - id: "deploy-apiv2"
+    name: "Build apiv2 and restart"
+    on_error: "stop"
+    steps:
+      - account_id: "prod-web"
+        workdir: "apiv2"
+        run: "make build"
+      - account_id: "prod-web"
+        run: "supervisorctl restart apiv2"

@@ -11,8 +11,8 @@ import (
 	"sync"
 	"time"
 
-	"godeploy/internal/config"
-	"godeploy/internal/domain"
+	"preflight/internal/config"
+	"preflight/internal/domain"
 
 	"github.com/fsnotify/fsnotify"
 )
@@ -79,7 +79,7 @@ func editorCommand(editorCmd string) ([]string, error) {
 // openEditor runs the configured terminal editor on target (an absolute
 // file or folder path) with the terminal handed over, mirroring the ssh
 // shell flow: the TUI has already exited, the editor owns stdin/stdout,
-// and returning from here returns to godeploy. cwd is where the editor
+// and returning from here returns to preflight. cwd is where the editor
 // starts (project root for local edits, the temp dir for remote edits).
 func openEditor(editorCmd, target, cwd string) error {
 	argv, err := editorCommand(editorCmd)
@@ -96,7 +96,7 @@ func openEditor(editorCmd, target, cwd string) error {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.Dir = cwd
-	fmt.Fprintf(os.Stderr, "Opening editor: %s %s (exit the editor to return to godeploy)\n", bin, target)
+	fmt.Fprintf(os.Stderr, "Opening editor: %s %s (exit the editor to return to preflight)\n", bin, target)
 	return cmd.Run()
 }
 
@@ -113,7 +113,7 @@ var saveTick = 400 * time.Millisecond
 // never shares state with the browser's connection.
 func openRemoteEdit(client domain.RemoteClient, newWatchClient func() (domain.RemoteClient, error), editorCmd, remotePath string) error {
 	base := filepath.Base(strings.ReplaceAll(remotePath, "/", string(os.PathSeparator)))
-	tmp, err := os.CreateTemp("", "godeploy-edit-*"+filepath.Ext(base))
+	tmp, err := os.CreateTemp("", "preflight-edit-*"+filepath.Ext(base))
 	if err != nil {
 		return fmt.Errorf("create temp file: %w", err)
 	}
@@ -164,7 +164,7 @@ func openRemoteEdit(client domain.RemoteClient, newWatchClient func() (domain.Re
 			// the temp copy for recovery instead of overwriting remotely.
 			keepTemp = true
 			fmt.Fprintf(os.Stderr,
-				"godeploy: editor exited with %v and %s differs from the last upload;\n"+
+				"preflight: editor exited with %v and %s differs from the last upload;\n"+
 					"keeping %s for recovery — %s was NOT updated with the last edit\n",
 				err, remotePath, tempPath, remotePath)
 		}
@@ -220,7 +220,7 @@ func newEditSession(client domain.RemoteClient, tempPath, remotePath string) (*e
 				if dirty {
 					dirty = false
 					if err := s.uploadIfChanged(); err != nil {
-						fmt.Fprintf(os.Stderr, "godeploy: upload-on-save failed: %v\n", err)
+						fmt.Fprintf(os.Stderr, "preflight: upload-on-save failed: %v\n", err)
 					}
 				}
 			case <-s.done:

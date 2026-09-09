@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"strings"
 
-	"godeploy/internal/config"
-	"godeploy/internal/pathcomp"
+	"preflight/internal/config"
+	"preflight/internal/pathcomp"
 )
 
 const (
@@ -18,6 +18,7 @@ const (
 	tagIgnoreBlanks  = "ignore_blanks"
 	tagStripComments = "strip_comments"
 	tagExclusions    = "exclusions"
+	tagGitStatus     = "git_status"
 )
 
 // openProjectForm opens the project editor; idx == -1 creates a new one.
@@ -64,6 +65,7 @@ func (m *Model) openProjectForm(idx int) {
 		{Tag: tagIgnoreBlanks, Kind: KindBool, Label: "Ignore blank lines", Value: boolVal(proj.TextDiffOptions.IgnoreBlankLines)},
 		{Tag: tagStripComments, Kind: KindBool, Label: "Strip comments", Value: boolVal(proj.TextDiffOptions.StripComments)},
 		{Tag: tagExclusions, Kind: KindText, Label: "Exclusions", Value: exclusions, Placeholder: ".git/, node_modules/, vendor/", Hint: "comma or newline separated"},
+		{Tag: tagGitStatus, Kind: KindBool, Label: "Git status sync", Value: boolVal(proj.GitStatus), Hint: "pre-mark git changes in sync"},
 		{Tag: tagMappings, Kind: KindEditor, Label: "Path mappings", Value: mappings, Hint: "Enter to edit multiple local/remote mappings", Display: mappingSummary},
 	}
 	form = NewForm(title, fields, func(f *Form) error {
@@ -160,6 +162,7 @@ func projectFromForm(f *Form) (config.Project, error) {
 			StripComments:    f.byTag(tagStripComments).Value == "1",
 		},
 		Exclusions: splitList(f.byTag(tagExclusions).Value),
+		GitStatus:  f.byTag(tagGitStatus).Value == "1",
 	}, nil
 }
 

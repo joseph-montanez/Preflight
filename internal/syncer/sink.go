@@ -4,7 +4,7 @@ import (
 	"sync"
 	"time"
 
-	"godeploy/internal/domain"
+	"preflight/internal/domain"
 )
 
 // TransferSink collects per-file transfer events from the Executor so the

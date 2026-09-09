@@ -4,7 +4,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"godeploy/internal/config"
+	"preflight/internal/config"
 )
 
 func TestResolveRemotePath(t *testing.T) {

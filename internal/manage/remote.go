@@ -7,9 +7,9 @@ import (
 	"strings"
 	"sync"
 
-	"godeploy/internal/config"
-	"godeploy/internal/domain"
-	"godeploy/internal/remote"
+	"preflight/internal/config"
+	"preflight/internal/domain"
+	"preflight/internal/remote"
 )
 
 // remoteCompleter lazily opens one connection per account and keeps it

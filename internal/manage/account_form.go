@@ -5,8 +5,8 @@ import (
 	"strconv"
 	"strings"
 
-	"godeploy/internal/config"
-	"godeploy/internal/pathcomp"
+	"preflight/internal/config"
+	"preflight/internal/pathcomp"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -125,7 +125,7 @@ func (m *Model) openAccountForm(idx int) {
 			return pathcomp.LocalPath(v, false)
 		}},
 		{Tag: tagPassHint, Kind: KindBool, Label: "Passphrase prompt", Value: boolVal(acc.Auth.PassphrasePrompt)},
-		{Tag: tagPassEnv, Kind: KindEnv, Label: "Password env", Value: acc.Auth.PasswordEnv, Placeholder: "GODEPLOY_PASSWORD", Hint: "Tab to complete", Complete: completeEnvName},
+		{Tag: tagPassEnv, Kind: KindEnv, Label: "Password env", Value: acc.Auth.PasswordEnv, Placeholder: "PREFLIGHT_PASSWORD", Hint: "Tab to complete", Complete: completeEnvName},
 		{Tag: tagSecret, Kind: KindSecret, Label: secretLabel, Hint: secretHint},
 	}
 

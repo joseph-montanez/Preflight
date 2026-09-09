@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"godeploy/internal/domain"
+	"preflight/internal/domain"
 )
 
 type Event struct {
@@ -175,7 +175,7 @@ func (e *Executor) upload(item *domain.SyncFileItem, localPath, remotePath strin
 	}
 
 	if renamer, ok := e.Client.(domain.RenameCapable); ok {
-		tmp := remotePath + ".godeploy-tmp"
+		tmp := remotePath + ".preflight-tmp"
 		if err := write(tmp); err != nil {
 			return err
 		}
@@ -218,7 +218,7 @@ func (e *Executor) download(item *domain.SyncFileItem, remotePath, localPath str
 	if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
 		return fmt.Errorf("create local dir %s: %w", filepath.Dir(localPath), err)
 	}
-	tmpPath := localPath + ".godeploy-tmp"
+	tmpPath := localPath + ".preflight-tmp"
 	output, err := os.Create(tmpPath)
 	if err != nil {
 		return fmt.Errorf("create local %s: %w", tmpPath, err)
@@ -358,5 +358,5 @@ func Summary(items []*domain.SyncFileItem) string {
 }
 
 func TempSuffix() string {
-	return fmt.Sprintf(".godeploy-tmp-%d", time.Now().UnixNano())
+	return fmt.Sprintf(".preflight-tmp-%d", time.Now().UnixNano())
 }

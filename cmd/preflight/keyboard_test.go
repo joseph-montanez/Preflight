@@ -76,6 +76,21 @@ func TestKeyboardInputModifiers(t *testing.T) {
 		{"\x1b[27;5;109~", "\r"},           // ctrl+m
 		{"\x1b[27;9;66~", "\x1b[27;9;66~"}, // unknown modifier: untouched
 		{"plain text", "plain text"},
+		// Kitty keyboard protocol CSI-u:
+		{"\x1b[109;3u", "\x1bm"},           // alt+m
+		{"\x1b[109;4u", "\x1bM"},           // shift+alt+m
+		{"\x1b[77;3u", "\x1bM"},            // alt+M
+		{"\x1b[109:77;4u", "\x1bM"},        // shift+alt+m with shifted codepoint
+		{"\x1b[101;3u", "\x1be"},           // alt+e
+		{"\x1b[101;4u", "\x1bE"},           // shift+alt+e
+		{"\x1b[13;3u", "\x1b\r"},           // alt+enter
+		{"\x1b[13u", "\r"},                 // enter
+		{"\x1b[9;2u", "\x1b[Z"},            // shift+tab
+		{"\x1b[57374u", "\x1b[B"},          // kitty down
+		{"\x1b[57373;3u", "\x1b[1;3A"},     // kitty alt+up
+		{"\x1b[109;3:1u", "\x1bm"},         // press event
+		{"\x1b[109;3:2u", "\x1bm"},         // repeat event
+		{"\x1b[109;3:3u", ""},              // release event (dropped)
 	}
 	for _, c := range cases {
 		var hold []byte
@@ -86,5 +101,26 @@ func TestKeyboardInputModifiers(t *testing.T) {
 		if len(hold) != 0 {
 			t.Errorf("translateCSIu(%q) left hold %q", c.in, hold)
 		}
+	}
+}
+
+func TestKeyboardInputKittyCSIu(t *testing.T) {
+	got := drain(t,
+		"/",
+		"b", "i", "l", "l",
+		"\x1b[57374u", // Kitty ↓
+		"\x1b[109;3u", // Kitty Alt+M
+		"\r",          // Enter
+	)
+	want := "/bill\x1b[B\x1bm\r"
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+func TestKeyboardInputKittySplitSequence(t *testing.T) {
+	got := drain(t, "\x1b[109;", "3u")
+	if got != "\x1bm" {
+		t.Fatalf("got %q, want alt+m", got)
 	}
 }

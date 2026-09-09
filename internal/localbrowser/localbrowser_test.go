@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"godeploy/internal/config"
-	ignoreengine "godeploy/internal/ignore"
+	"preflight/internal/config"
+	ignoreengine "preflight/internal/ignore"
 
 	tea "github.com/charmbracelet/bubbletea"
 )

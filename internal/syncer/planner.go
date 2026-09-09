@@ -12,11 +12,11 @@ import (
 	"sync/atomic"
 	"time"
 
-	"godeploy/internal/config"
-	diffengine "godeploy/internal/diff"
-	"godeploy/internal/domain"
-	ignoreengine "godeploy/internal/ignore"
-	"godeploy/internal/local"
+	"preflight/internal/config"
+	diffengine "preflight/internal/diff"
+	"preflight/internal/domain"
+	ignoreengine "preflight/internal/ignore"
+	"preflight/internal/local"
 )
 
 type Planner struct {
@@ -227,12 +227,20 @@ func (p *Planner) resolveBatches() ([]resolvedBatch, error) {
 			}
 		}
 		if !matched {
+			if len(scopes) > 1 {
+				// In multi-scope selection, skip unmapped entries rather than
+				// failing the entire sync operation.
+				continue
+			}
 			label := scope
 			if label == "" {
 				label = "."
 			}
 			return nil, fmt.Errorf("selected path %q is not covered by a path_mapping", label)
 		}
+	}
+	if len(batches) == 0 {
+		return nil, fmt.Errorf("no selected paths are covered by a path_mapping")
 	}
 	return batches, nil
 }

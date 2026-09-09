@@ -2,6 +2,7 @@ package browser
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -10,7 +11,9 @@ import (
 	"strings"
 	"time"
 
-	"godeploy/internal/pathcomp"
+	"preflight/internal/config"
+	"preflight/internal/git"
+	"preflight/internal/pathcomp"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
@@ -60,7 +63,8 @@ const contentsSearchDebounce = 120 * time.Millisecond
 //
 // Two variants share the same navigation:
 //   - scope mode (New): Space marks folders, finishing returns relative
-//     scopes; the r key switches to the remote source browser instead.
+//     scopes for the sync flow. Upload, download, and shell are chosen
+//     up front in the startup launcher, not here.
 //   - directory mode (PickDir): Space is disabled, finishing returns the
 //     absolute path of the current folder (used as a download destination).
 type Model struct {
@@ -78,10 +82,6 @@ type Model struct {
 	marked map[string]bool // folders to sync, keyed by relative path
 
 	pickDir bool // directory mode: finish returns the absolute current dir
-
-	remoteBrowse bool // user asked to browse the remote source instead
-	localUpload  bool // user asked to browse local files for upload instead
-	shellMode    bool // user asked to open an ssh shell into the account
 
 	inputMode     bool
 	input         textinput.Model
@@ -101,6 +101,20 @@ type Model struct {
 	editorCmd  string // config editor command line ("" = editor disabled)
 	editorMode bool   // user pressed e: open the editor on editTarget
 	editTarget string // absolute local path for the editor
+	exclusions []string // project exclusions to filter git changes
+	mappings   []config.PathMapping // project path mappings to filter valid sync scopes
+}
+
+// WithExclusions attaches project exclusions for git status filtering.
+func (m Model) WithExclusions(exclusions []string) Model {
+	m.exclusions = exclusions
+	return m
+}
+
+// WithMappings attaches project path mappings to constrain selectable scopes.
+func (m Model) WithMappings(mappings []config.PathMapping) Model {
+	m.mappings = mappings
+	return m
 }
 
 // New opens the sync scope browser at the project root. editorCmd is
@@ -130,18 +144,6 @@ func PickDir(root string) Model {
 // an empty list means the full project) and whether the user confirmed.
 // In directory mode it returns the absolute path of the chosen folder.
 func (m Model) Selected() ([]string, bool) { return m.selected, m.chosen }
-
-// RemoteBrowse reports whether the user pressed r to browse the remote
-// source instead of picking a sync scope.
-func (m Model) RemoteBrowse() bool { return m.remoteBrowse }
-
-// LocalUpload reports whether the user pressed u to browse local files
-// for upload instead of picking a sync scope.
-func (m Model) LocalUpload() bool { return m.localUpload }
-
-// ShellMode reports whether the user pressed t to open an ssh shell into
-// the project's account instead of picking a sync scope.
-func (m Model) ShellMode() bool { return m.shellMode }
 
 // MarkedPaths returns the marked sync scopes (root-relative, sorted),
 // used to preserve the selection across editor sessions.
@@ -177,7 +179,7 @@ func (m *Model) refresh() {
 		if m.pickDir {
 			m.status = "cannot read " + m.current + ": " + err.Error()
 		} else {
-			m.status = "cannot read " + m.current + ": " + err.Error() + " — fix local_root in godeploy -manage or pass -path"
+			m.status = "cannot read " + m.current + ": " + err.Error() + " — fix local_root in preflight -manage or pass -path"
 		}
 		return
 	}
@@ -342,24 +344,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		case " ":
 			m.toggleMark()
-		case "r":
-			if m.pickDir {
-				return m, nil
-			}
-			m.remoteBrowse = true
-			return m, tea.Quit
-		case "u":
-			if m.pickDir {
-				return m, nil
-			}
-			m.localUpload = true
-			return m, tea.Quit
-		case "t":
-			if m.pickDir {
-				return m, nil
-			}
-			m.shellMode = true
-			return m, tea.Quit
 		case "e":
 			if m.pickDir {
 				return m, nil
@@ -409,12 +393,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.up()
 		case "right", "l":
 			m.descendRow()
-		case "home", "g":
+		case "home":
 			m.cursor = 0
 			m.clampOffset()
-		case "end", "G":
+		case "end":
 			m.cursor = m.rowCount() - 1
 			m.clampOffset()
+		case "g", "G", "ctrl+g":
+			m.toggleGitChanges()
 		}
 	}
 	return m, nil
@@ -433,26 +419,26 @@ func (m *Model) handleInputKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// editing the query. alt+m marks it for sync without leaving the
 	// popup; alt+e opens the editor on it. (bubbletea parses ESC+letter
 	// reliably; alt+space and shift+space do not arrive as key events.)
-	if msg.Alt {
-		switch strings.ToLower(string(msg.Runes)) {
-		case "m":
-			if m.cands != nil {
-				m.toggleResultPath(m.cands[m.candAt])
-			} else if len(m.results) > 0 {
-				m.toggleResult(m.resultAt)
-			}
-			return *m, nil
-		case "e":
-			if len(m.results) > 0 {
-				m.startEditor(filepath.Join(m.root, filepath.FromSlash(m.results[m.resultAt].path)))
-			} else if m.cands != nil {
-				m.startEditor(filepath.Join(m.root, filepath.FromSlash(m.cands[m.candAt])))
-			}
-			if m.editorMode {
-				return *m, tea.Quit
-			}
-			return *m, nil
+	isAltM := (msg.Alt && strings.ToLower(string(msg.Runes)) == "m") || key == "alt+m" || key == "alt+M"
+	isAltE := (msg.Alt && strings.ToLower(string(msg.Runes)) == "e") || key == "alt+e" || key == "alt+E"
+	if isAltM {
+		if m.cands != nil {
+			m.toggleResultPath(m.cands[m.candAt])
+		} else if len(m.results) > 0 {
+			m.toggleResult(m.resultAt)
 		}
+		return *m, nil
+	}
+	if isAltE {
+		if len(m.results) > 0 {
+			m.startEditor(filepath.Join(m.root, filepath.FromSlash(m.results[m.resultAt].path)))
+		} else if m.cands != nil {
+			m.startEditor(filepath.Join(m.root, filepath.FromSlash(m.cands[m.candAt])))
+		}
+		if m.editorMode {
+			return *m, tea.Quit
+		}
+		return *m, nil
 	}
 	if m.cands != nil {
 		switch key {
@@ -556,6 +542,10 @@ func (m *Model) toggleResultPath(rel string) {
 	// marked map (and dedupeScopes) uses bare relative paths.
 	rel = strings.TrimSuffix(rel, "/")
 	if rel == "" {
+		return
+	}
+	if len(m.mappings) > 0 && !config.IsMappingCovered(rel, false, m.mappings) && !config.IsMappingCovered(rel, true, m.mappings) {
+		m.status = "cannot mark: not covered by any path_mapping"
 		return
 	}
 	if m.marked[rel] {
@@ -881,6 +871,10 @@ func (m *Model) finish() {
 		return
 	}
 	if rel := m.rel(); rel != "" {
+		if len(m.mappings) > 0 && !config.IsMappingCovered(rel, true, m.mappings) {
+			m.status = "cannot sync: folder is not covered by any path_mapping"
+			return
+		}
 		m.selected = []string{rel}
 	} else {
 		m.selected = nil
@@ -902,6 +896,10 @@ func (m *Model) toggleMark() {
 		if rel == "" {
 			m.marked = map[string]bool{"": true}
 			m.status = "full project selected (root)"
+			return
+		}
+		if len(m.mappings) > 0 && !config.IsMappingCovered(rel, true, m.mappings) {
+			m.status = "cannot select: folder is not covered by any path_mapping"
 			return
 		}
 		if m.marked[""] {
@@ -934,6 +932,10 @@ func (m *Model) toggleAt(idx int) {
 	}
 	e := m.entries[idx]
 	rel := filepath.ToSlash(filepath.Join(m.rel(), e.name))
+	if len(m.mappings) > 0 && !config.IsMappingCovered(rel, e.dir, m.mappings) {
+		m.status = "cannot mark: not covered by any path_mapping"
+		return
+	}
 	if m.marked[rel] {
 		delete(m.marked, rel)
 		m.status = "unmarked " + rel
@@ -941,6 +943,94 @@ func (m *Model) toggleAt(idx int) {
 		m.marked[rel] = true
 		m.status = "marked " + rel
 	}
+}
+
+// toggleGitChanges toggles marking of files with uncommitted changes in git status.
+// If all git changes are currently marked, it unmarks them; otherwise it marks all of them.
+func (m *Model) toggleGitChanges() {
+	if m.pickDir {
+		m.status = "git changes not available in destination picker"
+		return
+	}
+	paths, err := git.ChangedPaths(m.root, m.exclusions)
+	if err != nil {
+		if errors.Is(err, git.ErrNotGitRepo) {
+			m.status = "git: not a git repository"
+		} else if errors.Is(err, git.ErrGitNotFound) {
+			m.status = "git: git not found in PATH"
+		} else {
+			m.status = "git: " + err.Error()
+		}
+		return
+	}
+	if len(paths) == 0 {
+		m.status = "git: working tree clean"
+		return
+	}
+	if len(m.mappings) > 0 {
+		var mapped []string
+		for _, p := range paths {
+			if config.IsMappingCovered(p, false, m.mappings) {
+				mapped = append(mapped, p)
+			}
+		}
+		paths = mapped
+		if len(paths) == 0 {
+			m.status = "git: no changes in mapped folders"
+			return
+		}
+	}
+	allMarked := true
+	for _, p := range paths {
+		if !m.marked[p] {
+			allMarked = false
+			break
+		}
+	}
+	if allMarked {
+		for _, p := range paths {
+			delete(m.marked, p)
+		}
+		m.status = fmt.Sprintf("unmarked %d git changes", len(paths))
+	} else {
+		if m.marked[""] {
+			delete(m.marked, "")
+		}
+		for _, p := range paths {
+			m.marked[p] = true
+		}
+		m.status = fmt.Sprintf("marked %d files from git status", len(paths))
+	}
+}
+
+// MarkGitChanges pre-marks all files with uncommitted changes in git status.
+func (m *Model) MarkGitChanges() (int, error) {
+	if m.pickDir {
+		return 0, errors.New("git changes not available in destination picker")
+	}
+	paths, err := git.ChangedPaths(m.root, m.exclusions)
+	if err != nil {
+		return 0, err
+	}
+	if len(m.mappings) > 0 {
+		var mapped []string
+		for _, p := range paths {
+			if config.IsMappingCovered(p, false, m.mappings) {
+				mapped = append(mapped, p)
+			}
+		}
+		paths = mapped
+	}
+	if m.marked[""] {
+		delete(m.marked, "")
+	}
+	for _, p := range paths {
+		m.marked[p] = true
+	}
+	if len(paths) > 0 {
+		m.status = fmt.Sprintf("pre-marked %d files from git status", len(paths))
+	}
+	return len(paths), nil
 }
 
 // dedupeScopes drops scopes covered by a parent scope ("a" covers "a/b")
@@ -968,7 +1058,7 @@ func dedupeScopes(marked map[string]bool) []string {
 
 func (m Model) View() string {
 	if m.width == 0 {
-		return "godeploy: initializing..."
+		return "preflight: initializing..."
 	}
 	var b strings.Builder
 	header := " Select files / folders to sync"
@@ -1003,10 +1093,10 @@ func (m Model) View() string {
 	if m.pickDir {
 		hints = "[↑/↓] move  [Enter] open / select  [←] up  [/] search  [Q] quit"
 	} else {
-		hints += "  [R] browse remote  [U] upload local files  [T] shell  [E] editor"
+		hints += "  [G] git  [E] editor"
 	}
 	if m.inputMode {
-		hints = "[|] next filter  [%s/%type/%ext/%contents] filter  [↑/↓] pick  [Enter] open  [Alt+M] mark  [Esc] back"
+		hints = "[|] next filter  [%s/%type/%ext/%contents/%git] filter  [↑/↓] pick  [Enter] open  [Alt+M] mark  [Esc] back"
 	}
 	b.WriteString(faintStyle.Render(hints))
 	if m.status != "" {
@@ -1094,14 +1184,27 @@ func (m *Model) renderResults() string {
 func (m Model) renderRows() []string {
 	rows := make([]string, 0, m.rowCount())
 	curRel := m.rel()
+	curMapped := len(m.mappings) == 0 || config.IsMappingCovered(curRel, true, m.mappings)
 	mark := ""
 	if m.marked[curRel] {
 		mark = "✓ "
 	}
+	folderLabel := "(select this folder)"
+	if !curMapped {
+		folderLabel = "(select this folder — unmapped)"
+	}
 	if m.cursor == 0 {
-		rows = append(rows, accentStyle.Render("▸ "+mark+"(select this folder)"))
+		if !curMapped {
+			rows = append(rows, faintStyle.Render("▸ "+folderLabel))
+		} else {
+			rows = append(rows, accentStyle.Render("▸ "+mark+folderLabel))
+		}
 	} else {
-		rows = append(rows, "  "+mark+"(select this folder)")
+		if !curMapped {
+			rows = append(rows, faintStyle.Render("  "+folderLabel))
+		} else {
+			rows = append(rows, "  "+mark+folderLabel)
+		}
 	}
 	if m.canUp() {
 		if m.cursor == 1 {
@@ -1120,16 +1223,21 @@ func (m Model) renderRows() []string {
 			name += "/"
 		}
 		rowRel := filepath.ToSlash(filepath.Join(m.rel(), e.name))
+		mapped := len(m.mappings) == 0 || config.IsMappingCovered(rowRel, e.dir, m.mappings)
 		mark := ""
 		if m.marked[rowRel] {
 			mark = "✓ "
 		}
+		displayName := name
+		if !mapped {
+			displayName += " (unmapped)"
+		}
 		if m.cursor == i+off {
-			rows = append(rows, selectedStyle.Render(truncate("▸ "+mark+name, m.width)))
+			rows = append(rows, selectedStyle.Render(truncate("▸ "+mark+displayName, m.width)))
 			continue
 		}
-		label := "  " + mark + name
-		if !e.dir {
+		label := "  " + mark + displayName
+		if !e.dir || !mapped {
 			label = faintStyle.Render(label)
 		}
 		rows = append(rows, truncate(label, m.width))

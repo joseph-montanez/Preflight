@@ -1,6 +1,9 @@
-/godeploy
-*.godeploy-tmp
-*.godeploy-tmp-*
+/preflight
+/preflight.exe
+/pfl
+/pfl.cmd
+*.preflight-tmp
+*.preflight-tmp-*
 .DS_Store
 /.agents
 /plans

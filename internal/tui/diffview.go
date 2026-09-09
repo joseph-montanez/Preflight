@@ -6,10 +6,13 @@ import (
 	"strconv"
 	"strings"
 
+	"preflight/internal/diff"
+
 	"github.com/alecthomas/chroma/v2"
 	"github.com/alecthomas/chroma/v2/lexers"
 	"github.com/alecthomas/chroma/v2/styles"
 	"github.com/charmbracelet/lipgloss"
+	zone "github.com/lrstanley/bubblezone"
 )
 
 type diffCellKind uint8
@@ -27,13 +30,15 @@ type numberedDiffLine struct {
 }
 
 type splitDiffRow struct {
-	oldNumber int
-	newNumber int
-	oldText   string
-	newText   string
-	oldKind   diffCellKind
-	newKind   diffCellKind
-	hunk      string
+	oldNumber      int
+	newNumber      int
+	oldText        string
+	newText        string
+	oldKind        diffCellKind
+	newKind        diffCellKind
+	hunk           string
+	sectionIndex   int
+	isSectionStart bool
 }
 
 var hunkHeaderPattern = regexp.MustCompile(`^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@(.*)$`)
@@ -46,22 +51,58 @@ var (
 	addedGutter       = lipgloss.Color("#1F633F")
 	remoteHeaderStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FFFFFF")).Background(lipgloss.Color("#7A293A"))
 	localHeaderStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FFFFFF")).Background(lipgloss.Color("#216E45"))
+	pullBtnStyle      = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FFFFFF")).Background(lipgloss.Color("#0E639C"))
+	revertBtnStyle    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FFFFFF")).Background(lipgloss.Color("#7A293A"))
 )
 
-// parseUnifiedDiff converts a unified diff into aligned remote/local rows.
-// Consecutive removals and additions are paired, so a replacement appears on
-// one row instead of as two unrelated blocks.
-func parseUnifiedDiff(unified string) []splitDiffRow {
+// parseUnifiedDiff converts a unified diff into aligned remote/local rows and
+// extracts discrete change sections that can be pulled individually.
+func parseUnifiedDiff(unified string) ([]splitDiffRow, []diff.ChangeSection) {
 	lines := strings.Split(strings.ReplaceAll(unified, "\r\n", "\n"), "\n")
 	rows := make([]splitDiffRow, 0, len(lines))
+	var sections []diff.ChangeSection
 	var removed, added []numberedDiffLine
 	oldNumber, newNumber := 0, 0
 	inHunk := false
+	sectionIdx := 0
 
 	flushChanges := func() {
+		if len(removed) == 0 && len(added) == 0 {
+			return
+		}
+		sec := diff.ChangeSection{
+			Index:           sectionIdx,
+			LocalLineCount:  len(added),
+			RemoteLineCount: len(removed),
+		}
+		if len(added) > 0 {
+			sec.LocalStartLine = added[0].number
+			sec.LocalLines = make([]string, len(added))
+			for i, l := range added {
+				sec.LocalLines[i] = l.text
+			}
+		} else {
+			sec.LocalStartLine = newNumber
+		}
+		if len(removed) > 0 {
+			sec.RemoteStartLine = removed[0].number
+			sec.RemoteLines = make([]string, len(removed))
+			for i, l := range removed {
+				sec.RemoteLines[i] = l.text
+			}
+		} else {
+			sec.RemoteStartLine = oldNumber
+		}
+		sections = append(sections, sec)
+
 		count := max(len(removed), len(added))
 		for i := 0; i < count; i++ {
-			row := splitDiffRow{oldKind: diffCellEmpty, newKind: diffCellEmpty}
+			row := splitDiffRow{
+				oldKind:        diffCellEmpty,
+				newKind:        diffCellEmpty,
+				sectionIndex:   sectionIdx,
+				isSectionStart: i == 0,
+			}
 			if i < len(removed) {
 				row.oldNumber = removed[i].number
 				row.oldText = removed[i].text
@@ -74,6 +115,7 @@ func parseUnifiedDiff(unified string) []splitDiffRow {
 			}
 			rows = append(rows, row)
 		}
+		sectionIdx++
 		removed = removed[:0]
 		added = added[:0]
 	}
@@ -84,7 +126,7 @@ func parseUnifiedDiff(unified string) []splitDiffRow {
 			oldNumber, _ = strconv.Atoi(matches[1])
 			newNumber, _ = strconv.Atoi(matches[2])
 			inHunk = true
-			rows = append(rows, splitDiffRow{hunk: line})
+			rows = append(rows, splitDiffRow{hunk: line, sectionIndex: -1})
 			continue
 		}
 		if !inHunk || line == `\ No newline at end of file` {
@@ -99,12 +141,13 @@ func parseUnifiedDiff(unified string) []splitDiffRow {
 		case ' ':
 			flushChanges()
 			rows = append(rows, splitDiffRow{
-				oldNumber: oldNumber,
-				newNumber: newNumber,
-				oldText:   line[1:],
-				newText:   line[1:],
-				oldKind:   diffCellContext,
-				newKind:   diffCellContext,
+				oldNumber:    oldNumber,
+				newNumber:    newNumber,
+				oldText:      line[1:],
+				newText:      line[1:],
+				oldKind:      diffCellContext,
+				newKind:      diffCellContext,
+				sectionIndex: -1,
 			})
 			oldNumber++
 			newNumber++
@@ -117,10 +160,61 @@ func parseUnifiedDiff(unified string) []splitDiffRow {
 		}
 	}
 	flushChanges()
-	return rows
+	return rows, sections
 }
 
-func renderSplitDiff(path, summary, unified string, width int) string {
+func wrapLine(source string, width int) []string {
+	if width <= 0 {
+		return []string{""}
+	}
+	source = expandTabs(source, 4)
+	if lipgloss.Width(source) <= width {
+		return []string{source}
+	}
+
+	var chunks []string
+	runes := []rune(source)
+	start := 0
+
+	for start < len(runes) {
+		curWidth := 0
+		end := start
+		lastBreak := -1
+
+		for end < len(runes) {
+			rw := lipgloss.Width(string(runes[end]))
+			if curWidth+rw > width {
+				break
+			}
+			curWidth += rw
+			if runes[end] == ' ' || runes[end] == '\t' || runes[end] == ',' || runes[end] == '(' || runes[end] == ')' || runes[end] == '.' || runes[end] == ';' {
+				lastBreak = end + 1
+			}
+			end++
+		}
+
+		if end >= len(runes) {
+			chunks = append(chunks, string(runes[start:]))
+			break
+		}
+
+		if lastBreak > start && (lastBreak-start) >= max(1, width/3) {
+			chunks = append(chunks, string(runes[start:lastBreak]))
+			start = lastBreak
+		} else {
+			chunks = append(chunks, string(runes[start:end]))
+			start = end
+		}
+	}
+
+	return chunks
+}
+
+func renderSplitDiff(path, summary, unified string, width int, wrap bool, zm ...*zone.Manager) string {
+	var zones *zone.Manager
+	if len(zm) > 0 {
+		zones = zm[0]
+	}
 	width = max(20, width)
 	lexer := lexers.Match(path)
 	if lexer == nil {
@@ -148,30 +242,115 @@ func renderSplitDiff(path, summary, unified string, width int) string {
 	out.WriteString(renderLabel("LOCAL", rightWidth, localHeaderStyle))
 	out.WriteByte('\n')
 
-	rows := parseUnifiedDiff(unified)
+	rows, sections := parseUnifiedDiff(unified)
 	if len(rows) == 0 {
 		out.WriteString(mutedStyle.Render("No line-level text diff is available."))
 		return out.String()
 	}
+
+	const gutterWidth = 7
 	for _, row := range rows {
 		if row.hunk != "" {
 			out.WriteString(mutedStyle.Render(fitPlain("── "+row.hunk+" ", width)))
 			out.WriteByte('\n')
 			continue
 		}
-		out.WriteString(renderDiffCell(row.oldNumber, row.oldText, row.oldKind, leftWidth, lexer))
-		out.WriteString(mutedStyle.Render(separator))
-		out.WriteString(renderDiffCell(row.newNumber, row.newText, row.newKind, rightWidth, lexer))
-		out.WriteByte('\n')
+
+		leftCodeWidth := max(1, leftWidth-gutterWidth)
+		rightCodeWidth := max(1, rightWidth-gutterWidth)
+
+		var leftChunks []string
+		if row.oldKind == diffCellEmpty {
+			leftChunks = []string{""}
+		} else if wrap {
+			leftChunks = wrapLine(row.oldText, leftCodeWidth)
+		} else {
+			leftChunks = []string{fitPlain(expandTabs(row.oldText, 4), leftCodeWidth)}
+		}
+
+		var rightChunks []string
+		if row.newKind == diffCellEmpty {
+			rightChunks = []string{""}
+		} else if wrap {
+			rightChunks = wrapLine(row.newText, rightCodeWidth)
+		} else {
+			rightChunks = []string{fitPlain(expandTabs(row.newText, 4), rightCodeWidth)}
+		}
+
+		subRows := max(len(leftChunks), len(rightChunks))
+		if subRows < 1 {
+			subRows = 1
+		}
+
+		for k := 0; k < subRows; k++ {
+			// Left side
+			if k == 0 {
+				if k < len(leftChunks) {
+					out.WriteString(renderDiffCell(row.oldNumber, leftChunks[k], row.oldKind, leftWidth, true, lexer))
+				} else {
+					out.WriteString(renderDiffCell(0, "", diffCellEmpty, leftWidth, true, lexer))
+				}
+			} else {
+				if k < len(leftChunks) {
+					out.WriteString(renderDiffCell(0, leftChunks[k], row.oldKind, leftWidth, false, lexer))
+				} else {
+					out.WriteString(renderDiffCell(0, "", row.oldKind, leftWidth, false, lexer))
+				}
+			}
+
+			// Center separator
+			if k == 0 {
+				out.WriteString(renderSeparator(row, sections, zones))
+			} else {
+				out.WriteString(mutedStyle.Render(" ┆ "))
+			}
+
+			// Right side
+			if k == 0 {
+				if k < len(rightChunks) {
+					out.WriteString(renderDiffCell(row.newNumber, rightChunks[k], row.newKind, rightWidth, true, lexer))
+				} else {
+					out.WriteString(renderDiffCell(0, "", diffCellEmpty, rightWidth, true, lexer))
+				}
+			} else {
+				if k < len(rightChunks) {
+					out.WriteString(renderDiffCell(0, rightChunks[k], row.newKind, rightWidth, false, lexer))
+				} else {
+					out.WriteString(renderDiffCell(0, "", row.newKind, rightWidth, false, lexer))
+				}
+			}
+			out.WriteByte('\n')
+		}
 	}
 	return strings.TrimSuffix(out.String(), "\n")
+}
+
+func renderSeparator(row splitDiffRow, sections []diff.ChangeSection, zones *zone.Manager) string {
+	if row.sectionIndex < 0 || row.sectionIndex >= len(sections) {
+		return mutedStyle.Render(" │ ")
+	}
+	sec := sections[row.sectionIndex]
+	if row.isSectionStart {
+		btn := "[→]"
+		style := pullBtnStyle
+		if sec.RemoteLineCount == 0 && sec.LocalLineCount > 0 {
+			btn = "[✕]"
+			style = revertBtnStyle
+		}
+		renderedBtn := style.Render(btn)
+		if zones != nil {
+			renderedBtn = zones.Mark(fmt.Sprintf("pull-hunk-%d", sec.Index), renderedBtn)
+		}
+		return renderedBtn
+	}
+	return mutedStyle.Render(" ┆ ")
 }
 
 func renderLabel(label string, width int, style lipgloss.Style) string {
 	return style.Render(padPlain("  "+label, width))
 }
 
-func renderDiffCell(number int, source string, kind diffCellKind, width int, lexer chroma.Lexer) string {
+func renderDiffCell(number int, source string, kind diffCellKind, width int, isFirstSubline bool, lexer chroma.Lexer) string {
 	if width <= 0 {
 		return ""
 	}
@@ -190,8 +369,11 @@ func renderDiffCell(number int, source string, kind diffCellKind, width int, lex
 		marker, background, gutterBackground = "+", addedBackground, addedGutter
 	}
 	numberText := ""
-	if number > 0 {
+	if isFirstSubline && number > 0 {
 		numberText = strconv.Itoa(number)
+	}
+	if !isFirstSubline {
+		marker = " "
 	}
 	gutter := fmt.Sprintf("%s%4s  ", marker, numberText)
 	gutterStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#E6E6E6"))
@@ -203,10 +385,12 @@ func renderDiffCell(number int, source string, kind diffCellKind, width int, lex
 	if kind == diffCellEmpty {
 		return gutterStyle.Render(gutter) + strings.Repeat(" ", codeWidth)
 	}
-	source = expandTabs(source, 4)
 	source = fitPlain(source, codeWidth)
 	plainWidth := lipgloss.Width(source)
-	highlighted := highlightCode(source, lexer, background)
+	highlighted := ""
+	if source != "" {
+		highlighted = highlightCode(source, lexer, background)
+	}
 	paddingStyle := lipgloss.NewStyle()
 	if background != nil {
 		paddingStyle = paddingStyle.Background(background)
@@ -225,6 +409,11 @@ func highlightCode(source string, lexer chroma.Lexer, background lipgloss.Termin
 	}
 	var out strings.Builder
 	for token := iterator(); token != chroma.EOF; token = iterator() {
+		val := strings.ReplaceAll(token.Value, "\r", "")
+		val = strings.ReplaceAll(val, "\n", "")
+		if val == "" {
+			continue
+		}
 		entry := syntaxStyle.Get(token.Type)
 		style := lipgloss.NewStyle()
 		if entry.Colour.IsSet() {
@@ -234,7 +423,7 @@ func highlightCode(source string, lexer chroma.Lexer, background lipgloss.Termin
 			style = style.Background(background)
 		}
 		style = style.Bold(entry.Bold == chroma.Yes).Italic(entry.Italic == chroma.Yes).Underline(entry.Underline == chroma.Yes)
-		out.WriteString(style.Render(token.Value))
+		out.WriteString(style.Render(val))
 	}
 	return out.String()
 }

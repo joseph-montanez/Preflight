@@ -3,9 +3,12 @@ package browser
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"preflight/internal/config"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -588,76 +591,46 @@ func TestIndexAllSkipsHeavyDirs(t *testing.T) {
 	}
 }
 
-func TestRemoteBrowseKey(t *testing.T) {
-	m := sendKey(New(tree(t), ""), "r")
-	mm := m.(Model)
-	if !mm.RemoteBrowse() {
-		t.Fatal("RemoteBrowse() should be true after pressing r")
-	}
-	if mm.chosen {
-		t.Fatal("r must not count as a scope selection")
-	}
-}
-
-func TestRemoteBrowseKeyDisabledInDirMode(t *testing.T) {
-	m := sendKey(PickDir(tree(t)), "r")
-	mm := m.(Model)
-	if mm.RemoteBrowse() {
-		t.Fatal("r must be ignored in directory mode")
+// Upload, download, and shell are chosen up front in the startup launcher,
+// so r/u/t must stay inert in the scope browser: no selection, no quit.
+func TestLauncherKeysAreInertInScopeMode(t *testing.T) {
+	for _, k := range []string{"r", "u", "t"} {
+		m, cmd := New(tree(t), "").Update(key(k))
+		mm := m.(Model)
+		if cmd != nil {
+			t.Fatalf("key %q must not quit the scope browser", k)
+		}
+		if mm.chosen {
+			t.Fatalf("key %q must not count as a scope selection", k)
+		}
 	}
 }
 
-func TestLocalUploadKey(t *testing.T) {
-	m := sendKey(New(tree(t), ""), "u")
-	mm := m.(Model)
-	if !mm.LocalUpload() {
-		t.Fatal("LocalUpload() should be true after pressing u")
-	}
-	if mm.chosen {
-		t.Fatal("u must not count as a scope selection")
-	}
-}
-
-func TestLocalUploadKeyDisabledInDirMode(t *testing.T) {
-	m := sendKey(PickDir(tree(t)), "u")
-	mm := m.(Model)
-	if mm.LocalUpload() {
-		t.Fatal("u must be ignored in directory mode")
+func TestLauncherKeysAreInertInDirMode(t *testing.T) {
+	for _, k := range []string{"r", "u", "t"} {
+		m, cmd := PickDir(tree(t)).Update(key(k))
+		mm := m.(Model)
+		if cmd != nil {
+			t.Fatalf("key %q must not quit the directory browser", k)
+		}
+		if mm.chosen {
+			t.Fatalf("key %q must not count as a destination selection", k)
+		}
 	}
 }
 
-func TestShellKey(t *testing.T) {
-	m := sendKey(New(tree(t), ""), "t")
-	mm := m.(Model)
-	if !mm.ShellMode() {
-		t.Fatal("ShellMode() should be true after pressing t")
-	}
-	if mm.chosen {
-		t.Fatal("t must not count as a scope selection")
-	}
-}
-
-func TestShellKeyDisabledInDirMode(t *testing.T) {
-	m := sendKey(PickDir(tree(t)), "t")
-	mm := m.(Model)
-	if mm.ShellMode() {
-		t.Fatal("t must be ignored in directory mode")
-	}
-}
-
-func TestViewAdvertisesUploadKey(t *testing.T) {
+func TestViewAdvertisesEditorKeyOnly(t *testing.T) {
 	root := tree(t)
 	m := New(root, "")
 	m.width, m.height = 100, 24
 	view := m.View()
-	if !strings.Contains(view, "[U] upload local files") {
-		t.Fatalf("scope mode should advertise the upload key: %q", view)
+	if !strings.Contains(view, "[E] editor") {
+		t.Fatalf("scope mode should advertise the editor key: %q", view)
 	}
-	if !strings.Contains(view, "[T] shell") {
-		t.Fatalf("scope mode should advertise the shell key: %q", view)
-	}
-	if strings.Contains(PickDir(root).View(), "[U] upload local files") || strings.Contains(PickDir(root).View(), "[T] shell") {
-		t.Fatal("dir mode must not advertise the upload or shell keys")
+	for _, key := range []string{"[R] browse remote", "[U] upload local files", "[T] shell"} {
+		if strings.Contains(view, key) {
+			t.Fatalf("scope mode must not advertise %q: %q", key, view)
+		}
 	}
 }
 
@@ -734,3 +707,283 @@ func TestListScrollsWithCursor(t *testing.T) {
 		t.Fatalf("offset = %d, want 0 after home", m.(Model).offset)
 	}
 }
+
+func TestGitChangesKey(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	dir := t.TempDir()
+
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, string(out))
+		}
+	}
+
+	run("init")
+	run("config", "user.name", "Test")
+	run("config", "user.email", "test@example.com")
+
+	if err := os.WriteFile(filepath.Join(dir, "committed.go"), []byte("v1"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run("add", "committed.go")
+	run("commit", "-m", "init")
+
+	// Make changes
+	if err := os.WriteFile(filepath.Join(dir, "committed.go"), []byte("v2"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "untracked.go"), []byte("new"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	m := New(dir, "")
+	// Press G to mark git changes
+	m1 := sendKey(m, "G")
+	mm1 := m1.(Model)
+
+	if !mm1.marked["committed.go"] || !mm1.marked["untracked.go"] {
+		t.Fatalf("expected committed.go and untracked.go to be marked, got %v", mm1.marked)
+	}
+	if !strings.Contains(mm1.status, "marked 2 files from git status") {
+		t.Fatalf("status = %q, want 'marked 2 files from git status'", mm1.status)
+	}
+
+	// Press G again to toggle off
+	m2 := sendKey(mm1, "G")
+	mm2 := m2.(Model)
+	if len(mm2.marked) != 0 {
+		t.Fatalf("expected marked to be empty after toggle, got %v", mm2.marked)
+	}
+	if !strings.Contains(mm2.status, "unmarked 2 git changes") {
+		t.Fatalf("status = %q, want 'unmarked 2 git changes'", mm2.status)
+	}
+}
+
+func TestGitChangesKeyCleanRepo(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	dir := t.TempDir()
+
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, string(out))
+		}
+	}
+
+	run("init")
+	run("config", "user.name", "Test")
+	run("config", "user.email", "test@example.com")
+
+	if err := os.WriteFile(filepath.Join(dir, "committed.go"), []byte("v1"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run("add", "committed.go")
+	run("commit", "-m", "init")
+
+	m := New(dir, "")
+	m1 := sendKey(m, "g")
+	mm1 := m1.(Model)
+	if !strings.Contains(mm1.status, "clean") {
+		t.Fatalf("status = %q, want working tree clean", mm1.status)
+	}
+}
+
+func TestGitChangesKeyNotRepo(t *testing.T) {
+	dir := t.TempDir()
+	m := New(dir, "")
+	m1 := sendKey(m, "G")
+	mm1 := m1.(Model)
+	if !strings.Contains(mm1.status, "not a git repository") {
+		t.Fatalf("status = %q, want 'not a git repository'", mm1.status)
+	}
+}
+
+func TestSearchFilterGit(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	dir := t.TempDir()
+
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, string(out))
+		}
+	}
+
+	run("init")
+	run("config", "user.name", "Test")
+	run("config", "user.email", "test@example.com")
+
+	if err := os.WriteFile(filepath.Join(dir, "clean.go"), []byte("package main"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run("add", "clean.go")
+	run("commit", "-m", "init")
+
+	// Create dirty files
+	if err := os.WriteFile(filepath.Join(dir, "modified.go"), []byte("v1"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run("add", "modified.go")
+	run("commit", "-m", "add modified")
+	if err := os.WriteFile(filepath.Join(dir, "modified.go"), []byte("v2"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "untracked.go"), []byte("new"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	dirs, files := indexAll(dir)
+	filters, err := parseSearchQuery("%git")
+	if err != nil {
+		t.Fatalf("parseSearchQuery: %v", err)
+	}
+	results, err := applySearchFilters(t.Context(), dir, dirs, files, filters)
+	if err != nil {
+		t.Fatalf("applySearchFilters: %v", err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("results = %v, want 2 git changes", results)
+	}
+}
+
+func TestGitChangesKeyWithMappings(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	dir := t.TempDir()
+
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, string(out))
+		}
+	}
+
+	run("init")
+	run("config", "user.name", "Test")
+	run("config", "user.email", "test@example.com")
+
+	_ = os.MkdirAll(filepath.Join(dir, "src"), 0o755)
+	_ = os.MkdirAll(filepath.Join(dir, "docs"), 0o755)
+
+	if err := os.WriteFile(filepath.Join(dir, "src", "app.go"), []byte("v1"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "docs", "readme.md"), []byte("v1"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run("add", ".")
+	run("commit", "-m", "init")
+
+	// Modify both mapped and unmapped files
+	if err := os.WriteFile(filepath.Join(dir, "src", "app.go"), []byte("v2"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "docs", "readme.md"), []byte("v2"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	mappings := []config.PathMapping{
+		{LocalPath: "src", RemotePath: "/var/www/src"},
+	}
+
+	m := New(dir, "").WithMappings(mappings)
+	m1 := sendKey(m, "g").(Model)
+
+	if !m1.marked["src/app.go"] {
+		t.Errorf("expected src/app.go to be marked, got marked: %v", m1.marked)
+	}
+	if m1.marked["docs/readme.md"] {
+		t.Errorf("unmapped file docs/readme.md should NOT be marked")
+	}
+
+	// Now test when ONLY unmapped files have changes
+	run("checkout", "src/app.go") // revert mapped file change
+	m2 := New(dir, "").WithMappings(mappings)
+	m3 := sendKey(m2, "g").(Model)
+	if m3.status != "git: no changes in mapped folders" {
+		t.Errorf("expected status 'git: no changes in mapped folders', got %q", m3.status)
+	}
+	if len(m3.marked) != 0 {
+		t.Errorf("expected no marked files, got %v", m3.marked)
+	}
+}
+
+func TestToggleMarkUnmappedFolderAndFile(t *testing.T) {
+	dir := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(dir, "mapped"), 0o755)
+	_ = os.MkdirAll(filepath.Join(dir, "unmapped"), 0o755)
+	_ = os.WriteFile(filepath.Join(dir, "unmapped", "file.txt"), []byte("hi"), 0o644)
+	_ = os.WriteFile(filepath.Join(dir, "mapped", "app.go"), []byte("hi"), 0o644)
+
+	mappings := []config.PathMapping{
+		{LocalPath: "mapped", RemotePath: "/var/www/mapped"},
+	}
+
+	m := New(dir, "").WithMappings(mappings)
+	// Find index of "unmapped" in m.entries
+	unmappedIdx := -1
+	mappedIdx := -1
+	for i, e := range m.entries {
+		if e.name == "unmapped" {
+			unmappedIdx = i
+		}
+		if e.name == "mapped" {
+			mappedIdx = i
+		}
+	}
+	if unmappedIdx == -1 || mappedIdx == -1 {
+		t.Fatalf("could not find entries: unmapped=%d, mapped=%d", unmappedIdx, mappedIdx)
+	}
+
+	// Attempt to toggle unmapped directory
+	m.toggleAt(unmappedIdx)
+	if m.marked["unmapped"] {
+		t.Errorf("unmapped dir should not be marked")
+	}
+	if m.status != "cannot mark: not covered by any path_mapping" {
+		t.Errorf("expected 'cannot mark: not covered by any path_mapping', got %q", m.status)
+	}
+
+	// Toggle mapped directory should succeed
+	m.toggleAt(mappedIdx)
+	if !m.marked["mapped"] {
+		t.Errorf("mapped dir should be marked")
+	}
+}
+
+func TestFinishUnmappedFolder(t *testing.T) {
+	dir := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(dir, "mapped"), 0o755)
+	_ = os.MkdirAll(filepath.Join(dir, "unmapped"), 0o755)
+
+	mappings := []config.PathMapping{
+		{LocalPath: "mapped", RemotePath: "/var/www/mapped"},
+	}
+
+	// Enter unmapped directory
+	m := New(dir, "").WithMappings(mappings)
+	m.jump("unmapped")
+	m.finish()
+
+	if m.chosen {
+		t.Errorf("finish() should not have succeeded for unmapped folder")
+	}
+	if m.status != "cannot sync: folder is not covered by any path_mapping" {
+		t.Errorf("expected 'cannot sync: folder is not covered by any path_mapping', got %q", m.status)
+	}
+}
+
+
+

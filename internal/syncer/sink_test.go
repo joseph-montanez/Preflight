@@ -4,7 +4,7 @@ import (
 	"errors"
 	"testing"
 
-	"godeploy/internal/domain"
+	"preflight/internal/domain"
 )
 
 func TestTransferSink(t *testing.T) {

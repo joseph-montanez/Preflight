@@ -7,8 +7,8 @@ import (
 	"sort"
 	"strings"
 
-	"godeploy/internal/config"
-	ignoreengine "godeploy/internal/ignore"
+	"preflight/internal/config"
+	ignoreengine "preflight/internal/ignore"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
@@ -332,18 +332,19 @@ func (m Model) handleSearchKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Modifier keys act on the highlighted entry while the filter is
 	// open (plain keys keep editing the query): alt+m toggles its mark
 	// (same as Space in the full listing), alt+e opens the editor on it.
-	if msg.Alt {
-		switch strings.ToLower(string(msg.Runes)) {
-		case "m":
-			m.toggleMark()
-			return m, nil
-		case "e":
-			m.requestEdit()
-			if m.editPath != "" {
-				return m, tea.Quit
-			}
-			return m, nil
+	key := msg.String()
+	isAltM := (msg.Alt && strings.ToLower(string(msg.Runes)) == "m") || key == "alt+m" || key == "alt+M"
+	isAltE := (msg.Alt && strings.ToLower(string(msg.Runes)) == "e") || key == "alt+e" || key == "alt+E"
+	if isAltM {
+		m.toggleMark()
+		return m, nil
+	}
+	if isAltE {
+		m.requestEdit()
+		if m.editPath != "" {
+			return m, tea.Quit
 		}
+		return m, nil
 	}
 	switch msg.String() {
 	case "esc":
@@ -560,7 +561,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m Model) View() string {
 	if m.width == 0 {
-		return "godeploy: initializing..."
+		return "preflight: initializing..."
 	}
 	var b strings.Builder
 	header := " Browse local files to upload"

@@ -6,8 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"godeploy/internal/domain"
-	ignoreengine "godeploy/internal/ignore"
+	"preflight/internal/domain"
+	ignoreengine "preflight/internal/ignore"
 )
 
 func Scan(projectRoot, scope string, ignores *ignoreengine.Engine) (map[string]*domain.FileMeta, error) {
@@ -44,6 +44,18 @@ func ScanProgress(projectRoot, scope string, ignores *ignoreengine.Engine, onFil
 		}
 		if onFile != nil {
 			onFile()
+		}
+		return files, nil
+	} else if os.IsNotExist(err) {
+		// The scope path does not exist locally (e.g. a deleted file from git status,
+		// or a remote-only file). Return an empty files map so the planner can pair
+		// it with remote files for download or deletion.
+		projectRel, relErr := filepath.Rel(projectRoot, scopeRoot)
+		if relErr != nil {
+			return nil, relErr
+		}
+		if ignores != nil && ignores.RootIgnored(filepath.ToSlash(projectRel), false) {
+			return files, nil
 		}
 		return files, nil
 	}

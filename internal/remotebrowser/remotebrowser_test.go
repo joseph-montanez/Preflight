@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"godeploy/internal/config"
-	"godeploy/internal/domain"
+	"preflight/internal/config"
+	"preflight/internal/domain"
 
 	tea "github.com/charmbracelet/bubbletea"
 )

@@ -81,6 +81,76 @@ func TestProjectPathMappingValidation(t *testing.T) {
 	}
 }
 
+func TestValidateTasks(t *testing.T) {
+	sftp := Account{ID: "sftp1", Protocol: "sftp", Host: "h"}
+	ftp := Account{ID: "ftp1", Protocol: "ftp", Host: "h"}
+	good := Task{ID: "deploy", Name: "Deploy", Steps: []TaskStep{
+		{AccountID: "sftp1", Workdir: "apiv2", Run: "make build"},
+		{AccountID: "sftp1", Run: "supervisorctl restart apiv2"},
+	}}
+	tests := []struct {
+		name    string
+		tasks   []Task
+		wantErr string
+	}{
+		{name: "no tasks", tasks: nil, wantErr: ""},
+		{name: "valid multi-step", tasks: []Task{good}, wantErr: ""},
+		{name: "continue on error", tasks: []Task{{ID: "c", OnError: "continue",
+			Steps: []TaskStep{{AccountID: "sftp1", Run: "x"}}}}, wantErr: ""},
+		{name: "missing id", tasks: []Task{{Steps: []TaskStep{{AccountID: "sftp1", Run: "x"}}}},
+			wantErr: "tasks[0].id is required"},
+		{name: "duplicate id", tasks: []Task{good, {ID: "deploy",
+			Steps: []TaskStep{{AccountID: "sftp1", Run: "x"}}}},
+			wantErr: `duplicate task id "deploy"`},
+		{name: "bad on error", tasks: []Task{{ID: "b", OnError: "retry",
+			Steps: []TaskStep{{AccountID: "sftp1", Run: "x"}}}},
+			wantErr: `task "b" on_error must be stop or continue`},
+		{name: "no steps", tasks: []Task{{ID: "empty"}}, wantErr: `task "empty" has no steps`},
+		{name: "empty run", tasks: []Task{{ID: "e",
+			Steps: []TaskStep{{AccountID: "sftp1"}}}}, wantErr: `task "e" steps[0].run is required`},
+		{name: "unknown account", tasks: []Task{{ID: "u",
+			Steps: []TaskStep{{AccountID: "nope", Run: "x"}}}}, wantErr: `task "u" steps[0]: account "nope" not found`},
+		{name: "ftp account rejected", tasks: []Task{{ID: "f",
+			Steps: []TaskStep{{AccountID: "ftp1", Run: "x"}}}},
+			wantErr: `task "f" steps[0]: account "ftp1" uses "ftp", only sftp accounts can run commands`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &Config{Accounts: []Account{sftp, ftp}, Tasks: tt.tasks}
+			err := cfg.ValidateTasks()
+			if tt.wantErr == "" && err != nil {
+				t.Fatalf("ValidateTasks() = %v, want nil", err)
+			}
+			if tt.wantErr != "" {
+				if err == nil {
+					t.Fatalf("ValidateTasks() = nil, want %q", tt.wantErr)
+				}
+				if err.Error() != tt.wantErr {
+					t.Fatalf("ValidateTasks() = %q, want %q", err.Error(), tt.wantErr)
+				}
+			}
+		})
+	}
+}
+
+func TestTaskLookupAndContinue(t *testing.T) {
+	cfg := &Config{Tasks: []Task{
+		{ID: "a", Steps: []TaskStep{{AccountID: "x", Run: "y"}}},
+		{ID: "b", OnError: "Continue", Steps: []TaskStep{{AccountID: "x", Run: "y"}}},
+	}}
+	got, err := cfg.Task("a")
+	if err != nil || got.ID != "a" || got.ContinueOnError() {
+		t.Fatalf(`Task("a") = %+v, %v, want stop semantics`, got, err)
+	}
+	got, err = cfg.Task("b")
+	if err != nil || !got.ContinueOnError() {
+		t.Fatalf(`Task("b") should continue on error: %+v, %v`, got, err)
+	}
+	if _, err := cfg.Task("missing"); err == nil {
+		t.Fatal(`Task("missing") should fail`)
+	}
+}
+
 func TestEditorFieldParse(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
@@ -168,8 +238,79 @@ func TestLoadSecretsMissing(t *testing.T) {
 }
 
 func TestSecretsPath(t *testing.T) {
-	want := filepath.Join(string(filepath.Separator), "etc", "godeploy", "secrets.yaml")
-	if got := SecretsPath("/etc/godeploy/config.yaml"); got != want {
+	want := filepath.Join(string(filepath.Separator), "etc", "preflight", "secrets.yaml")
+	if got := SecretsPath("/etc/preflight/config.yaml"); got != want {
 		t.Fatalf("SecretsPath = %q, want %q", got, want)
 	}
 }
+
+func TestIsMappingCovered(t *testing.T) {
+	// Root mapping covers everything
+	rootMappings := []PathMapping{{LocalPath: "", RemotePath: "/srv"}}
+	if !IsMappingCovered("README.md", false, rootMappings) {
+		t.Error("root mapping should cover README.md")
+	}
+	if !IsMappingCovered("src/app.go", false, rootMappings) {
+		t.Error("root mapping should cover src/app.go")
+	}
+	if !IsMappingCovered("src", true, rootMappings) {
+		t.Error("root mapping should cover src dir")
+	}
+
+	// Specific mappings
+	mappings := []PathMapping{
+		{LocalPath: "public", RemotePath: "/var/www/public"},
+		{LocalPath: "client/dist", RemotePath: "/var/www/client"},
+	}
+
+	// Covered files
+	if !IsMappingCovered("public/index.html", false, mappings) {
+		t.Error("public/index.html should be covered")
+	}
+	if !IsMappingCovered("public/css/style.css", false, mappings) {
+		t.Error("public/css/style.css should be covered")
+	}
+	if !IsMappingCovered("client/dist/bundle.js", false, mappings) {
+		t.Error("client/dist/bundle.js should be covered")
+	}
+
+	// Covered directories
+	if !IsMappingCovered("public", true, mappings) {
+		t.Error("public dir should be covered")
+	}
+	if !IsMappingCovered("public/css", true, mappings) {
+		t.Error("public/css dir should be covered")
+	}
+	if !IsMappingCovered("client", true, mappings) {
+		t.Error("client dir (ancestor of client/dist) should be covered")
+	}
+	if !IsMappingCovered("client/dist", true, mappings) {
+		t.Error("client/dist dir should be covered")
+	}
+	if !IsMappingCovered("", true, mappings) {
+		t.Error("root dir should be covered as ancestor of mappings")
+	}
+
+	// Unmapped files
+	if IsMappingCovered("README.md", false, mappings) {
+		t.Error("README.md should NOT be covered")
+	}
+	if IsMappingCovered("Makefile", false, mappings) {
+		t.Error("Makefile should NOT be covered")
+	}
+	if IsMappingCovered("client/package.json", false, mappings) {
+		t.Error("client/package.json should NOT be covered (outside client/dist)")
+	}
+	if IsMappingCovered("tests/test.go", false, mappings) {
+		t.Error("tests/test.go should NOT be covered")
+	}
+
+	// Unmapped directories
+	if IsMappingCovered("tests", true, mappings) {
+		t.Error("tests dir should NOT be covered")
+	}
+	if IsMappingCovered("client/src", true, mappings) {
+		t.Error("client/src dir should NOT be covered")
+	}
+}
+

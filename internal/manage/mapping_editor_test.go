@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"godeploy/internal/config"
+	"preflight/internal/config"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"

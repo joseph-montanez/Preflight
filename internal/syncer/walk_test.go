@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"godeploy/internal/domain"
+	"preflight/internal/domain"
 )
 
 type walkInfo struct {

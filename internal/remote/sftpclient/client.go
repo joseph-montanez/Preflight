@@ -12,8 +12,8 @@ import (
 	"strings"
 	"time"
 
-	"godeploy/internal/config"
-	"godeploy/internal/domain"
+	"preflight/internal/config"
+	"preflight/internal/domain"
 
 	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
@@ -218,6 +218,23 @@ func (c *Client) FastHash(path string) (string, error) {
 
 func shellQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", `'\''`) + "'"
+}
+
+// Exec runs a shell command on the remote host, streaming stdout and stderr
+// as the command runs. A non-zero exit status returns the ssh exit error;
+// callers report it with the status code.
+func (c *Client) Exec(command string, stdout, stderr io.Writer) error {
+	if c.sshClient == nil {
+		return errors.New("SFTP client is not connected")
+	}
+	session, err := c.sshClient.NewSession()
+	if err != nil {
+		return err
+	}
+	defer session.Close()
+	session.Stdout = stdout
+	session.Stderr = stderr
+	return session.Run(command)
 }
 
 func ExpandKeyPath(path string) string {

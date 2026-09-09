@@ -61,3 +61,23 @@ func TestRealBytesAltShiftMMarksHighlighted(t *testing.T) {
 		t.Fatalf("query = %q, want api (no leaked letter)", m.input.Value())
 	}
 }
+
+func TestRealBytesAltMMarksHighlightedFile(t *testing.T) {
+	root := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(root, "app", "billing"), 0o755)
+	_ = os.WriteFile(filepath.Join(root, "app", "billing", "invoice.go"), []byte("invoice"), 0o644)
+	_ = os.WriteFile(filepath.Join(root, "app", "billing", "receipt.go"), []byte("receipt"), 0o644)
+
+	m0 := New(root, "")
+	m0.width, m0.height = 80, 24
+	// Search "billing", arrow down to invoice.go, press Alt+M (\x1bm as translated by keyboardInput).
+	mm := feedRealBytes(t, m0, "/", "b", "i", "l", "l", "i", "n", "g", "\x1b[B", "\x1bm")
+	if !mm.marked["app/billing/invoice.go"] {
+		t.Fatalf("Alt+M on file in search must mark it; marked = %v", mm.marked)
+	}
+	mm.finish()
+	scopes, ok := mm.Selected()
+	if !ok || len(scopes) != 1 || scopes[0] != "app/billing/invoice.go" {
+		t.Fatalf("Selected() = %v, %v, want [app/billing/invoice.go], true", scopes, ok)
+	}
+}

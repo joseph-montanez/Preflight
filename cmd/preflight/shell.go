@@ -9,12 +9,12 @@ import (
 	"strconv"
 	"strings"
 
-	"godeploy/internal/config"
+	"preflight/internal/config"
 )
 
 // openShell drops the user into an interactive ssh session for the
 // account, reusing the real terminal after the TUI has exited (the ssh
-// client handles its own pty, prompts, and signals — godeploy only wires
+// client handles its own pty, prompts, and signals — preflight only wires
 // stdin/stdout/stderr through). Returns nil when the shell exited
 // normally; any error is wrapped for the caller.
 func openShell(account config.Account, secrets *config.Secrets) error {
@@ -36,7 +36,7 @@ func openShell(account config.Account, secrets *config.Secrets) error {
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	fmt.Fprintf(os.Stderr, "Opening shell: %s@%s:%d (exit the shell to return to godeploy)\n",
+	fmt.Fprintf(os.Stderr, "Opening shell: %s@%s:%d (exit the shell to return to preflight)\n",
 		account.Auth.Username, account.Host, account.Port)
 	return cmd.Run()
 }
@@ -82,7 +82,7 @@ func shellArgs(account config.Account) ([]string, error) {
 
 // configureAskPass makes ssh read the stored secret (password for
 // password accounts, passphrase for key accounts) non-interactively by
-// pointing SSH_ASKPASS at the godeploy binary itself, which prints the
+// pointing SSH_ASKPASS at the preflight binary itself, which prints the
 // secret in -askpass mode. The secret travels via an environment
 // variable, never through a temp file. Without a stored secret it leaves
 // ssh to prompt interactively in the terminal. SSH_ASKPASS_REQUIRE=force
@@ -102,13 +102,13 @@ func configureAskPass(account config.Account, secrets *config.Secrets) (cleanup 
 	if err := os.Setenv("SSH_ASKPASS_REQUIRE", "force"); err != nil {
 		return func() {}, err
 	}
-	if err := os.Setenv("GODEPLOY_ASKPASS_SECRET", secret); err != nil {
+	if err := os.Setenv("PREFLIGHT_ASKPASS_SECRET", secret); err != nil {
 		return func() {}, err
 	}
 	return func() {
 		_ = os.Unsetenv("SSH_ASKPASS")
 		_ = os.Unsetenv("SSH_ASKPASS_REQUIRE")
-		_ = os.Unsetenv("GODEPLOY_ASKPASS_SECRET")
+		_ = os.Unsetenv("PREFLIGHT_ASKPASS_SECRET")
 	}, nil
 }
 
@@ -131,5 +131,5 @@ func storedSecret(account config.Account, secrets *config.Secrets) string {
 // askpassMode is the hidden -askpass entry point: ssh invokes this
 // binary with the prompt as argv[1] and reads the secret from stdout.
 func askpassMode() {
-	fmt.Fprintln(os.Stdout, os.Getenv("GODEPLOY_ASKPASS_SECRET"))
+	fmt.Fprintln(os.Stdout, os.Getenv("PREFLIGHT_ASKPASS_SECRET"))
 }

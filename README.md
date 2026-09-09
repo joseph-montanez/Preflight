@@ -1,10 +1,11 @@
-# godeploy
+# preflight
 
 Terminal-first deployment/synchronization tool for local projects and SFTP/FTP/FTPS targets.
 
 ## Current starter features
 
-- YAML accounts/projects configuration
+- YAML accounts/projects/tasks configuration
+- Saved multi-step remote command tasks with live output (`Run` action or `-run`)
 - SFTP key, ssh-agent, and password authentication
 - FTP and explicit/implicit FTPS password authentication
 - Scoped local/remote recursive scanning
@@ -35,29 +36,33 @@ Terminal-first deployment/synchronization tool for local projects and SFTP/FTP/F
 ## Setup
 
 ```bash
-mkdir -p ~/.config/godeploy
-cp config.example.yaml ~/.config/godeploy/config.yaml
+mkdir -p ~/.config/preflight
+cp config.example.yaml ~/.config/preflight/config.yaml
 go mod tidy
-go run ./cmd/godeploy
+go run ./cmd/preflight
 ```
 
-Running without `-p` opens an interactive project picker. Select a project to
-synchronize, press `T` to shell into its account immediately, or switch to the
-Accounts list with `A`/`Tab` and shell into any SFTP account—including accounts
-that are not linked to a project. Next, a **local folder browser** opens at the selected project's `local_root`: descend into subfolders and
+Running without `-p` opens an action-first launcher. Pick what to do —
+**Sync**, **Upload**, **Download**, **SSH**, **Manage**, or **Run** — then pick the
+target: a project for Sync/Upload/Download, an account for SSH (including
+accounts that are not linked to a project), a saved task for Run,
+and no second step for Manage.
+For Sync, a **local folder browser** opens at the selected project's `local_root`: descend into subfolders and
 mark folders or individual files as sync scopes (or pick the root for a
-full sync) — only then does godeploy connect to the remote and scan. To
+full sync) — only then does preflight connect to the remote and scan. Upload
+and Download skip the folder browser and go straight to their source
+browsers. To
 skip both steps:
 
 ```bash
-go run ./cmd/godeploy -p api-backend
+go run ./cmd/preflight -p api-backend
 ```
 
 Scoped synchronization:
 
 ```bash
-go run ./cmd/godeploy -p api-backend -path src/controllers
-go run ./cmd/godeploy -p api-backend -path public/index.php  # single file
+go run ./cmd/preflight -p api-backend -path src/controllers
+go run ./cmd/preflight -p api-backend -path public/index.php  # single file
 ```
 
 ### Per-folder remote mappings
@@ -83,7 +88,7 @@ syncs it to `/var/www/site/assets`; selecting `deploy/config` syncs it to
 relative to `local_root`.
 
 Existing projects that only have `remote_root` remain valid; it behaves like a
-single mapping from the project root. In `godeploy -manage`, select **Path
+single mapping from the project root. In `preflight -manage`, select **Path
 mappings** and press `Enter` to open the dedicated row editor. Local and remote
 columns both support `Tab` completion; local results remain relative to the
 project's Local root.
@@ -95,15 +100,16 @@ so it works for SFTP and FTP alike. Tune with
 
 ## Config manager
 
-Manage accounts and projects interactively instead of hand-editing the YAML:
+Manage accounts and projects interactively instead of hand-editing the YAML —
+pick **Manage** in the startup launcher, or:
 
 ```bash
-go run ./cmd/godeploy -manage
+go run ./cmd/preflight -manage
 ```
 
 The manager starts with an empty config when the file does not exist yet, so
-it can also be used to create one from scratch. Accounts and projects are
-grouped in two tabbed lists. **Edits are written to disk immediately**: saving
+it can also be used to create one from scratch. Accounts, projects, and tasks are
+grouped in three tabbed lists. **Edits are written to disk immediately**: saving
 a form (`Enter`) or confirming a delete persists `config.yaml` (and
 `secrets.yaml`) right away, so quitting never loses work. `s` re-writes
 manually, and if a write ever fails, `q` offers `y` save-and-quit / `n`
@@ -111,8 +117,8 @@ quit-without-saving / `esc` stay.
 
 | Key | Action |
 |---|---|
-| `Tab`, `1`, `2` | Switch Accounts/Projects section |
-| `Enter` | Edit selected account/project |
+| `Tab`, `1`, `2`, `3` | Switch Accounts/Projects/Tasks section |
+| `Enter` | Edit selected account/project/task |
 | `T` | On the Accounts tab, open an SSH shell for the selected SFTP account; return to Manage when the shell exits |
 | `N` | New account/project |
 | `D` | Delete (confirmation; warns when an account is still referenced) |
@@ -149,36 +155,93 @@ the config file (created with `0600` permissions). Typing a new value
 replaces the stored secret; `Ctrl+X` on that field clears it; leaving it
 empty keeps the stored value. `password_env` remains an alternative source.
 
+## Tasks
+
+Tasks are named multi-step remote command runs, JetBrains-run-configuration
+style. Pick **Run** in the startup launcher, or run one directly:
+
+```bash
+go run ./cmd/preflight -run deploy-apiv2
+```
+
+```yaml
+tasks:
+  - id: "deploy-apiv2"
+    name: "Build apiv2 and restart"
+    on_error: "stop"   # or "continue"
+    steps:
+      - account_id: "kiosks"
+        workdir: "apiv2"
+        run: "make build"
+      - account_id: "kiosk-root"
+        run: "supervisorctl restart apiv2"
+```
+
+Steps run in order over SFTP accounts (FTP has no shell and is rejected).
+`workdir` is entered with `cd` before `run`, so consecutive steps share
+nothing except what the commands themselves persist on the server. One
+connection opens per account and is reused across its steps; output streams
+live under a `▸ [account] $ command` header per step. A failing step stops
+the run unless `on_error` is `"continue"`, and the exit status names the
+failing step. Steps are non-interactive: no sudo prompts, no TTY, no stdin.
+Remote `ssh exec` does not source login profiles, so profile `PATH` entries
+(like a Go install) are missing by default — set `shell: "bash -lc"` on the
+step to run it in a login shell:
+
+```yaml
+      - account_id: "kiosks"
+        workdir: "apiv2"
+        shell: "bash -lc"
+        run: "make build"
+```
+
+Manage tasks on the manager's **Tasks** tab (`Enter` on the Steps row opens
+the step editor: `Tab` completes the account, `Ctrl+N`/`Ctrl+D` add/remove
+rows, `Ctrl+↑`/`Ctrl+↓` reorder, `Enter` applies; the SHELL column holds an
+optional interpreter like `bash -lc`).
+
 Build:
 
 ```bash
-go build -o godeploy ./cmd/godeploy
+go build -o preflight ./cmd/preflight
+# or: make build  (also symlinks pfl -> preflight, so `pfl` works as an alias)
 ```
 
 Windows:
 
 ```powershell
-New-Item -ItemType Directory -Force "$HOME\.config\godeploy"
-Copy-Item .\config.example.yaml "$HOME\.config\godeploy\config.yaml"
+New-Item -ItemType Directory -Force "$HOME\.config\preflight"
+Copy-Item .\config.example.yaml "$HOME\.config\preflight\config.yaml"
 go mod tidy
 .\build.ps1            # production build (trimpath + stripped symbols)
-.\build.ps1 -Debug     # same as `make build` (go build -o godeploy.exe .\cmd\godeploy)
-.\godeploy.exe -p api-backend
+.\build.ps1 -Debug     # same as `make build` (go build -o preflight.exe .\cmd\preflight)
+.\preflight.exe -p api-backend
 ```
+
+`build.ps1` also writes a `pfl.cmd` shim next to `preflight.exe`, so with the
+folder on your `PATH` you can run `pfl` in cmd/PowerShell as an alias for
+`preflight` (arguments are forwarded as-is).
 
 ## TUI keys
 
-Project picker (`godeploy` without `-p`):
+Startup launcher (`preflight` without `-p`):
+
+First pick the action — Sync, Upload, Download, SSH, Manage, or Run — then pick
+the filtered target. SSH lists accounts only; Sync/Upload/Download list
+projects only; Run lists saved tasks; Manage needs no target and opens the
+config manager (same destination as `preflight -manage`).
 
 | Key | Action |
 |---|---|
-| `↑`/`↓`, `j`/`k` | Move within the visible Projects or Accounts list |
-| `Enter` | Projects: start sync. Accounts: open an SSH shell. |
-| `T` | Projects: shell into the highlighted project's account. Accounts: shell into the highlighted account. |
-| `A`, `Tab` | Show all accounts, including accounts with no linked projects |
-| `P`, `Tab` | Return to the Projects list |
-| `1`–`9` | Jump to item N in the visible list |
-| `q`, `Esc` | Quit |
+| `↑`/`↓`, `j`/`k` | Move within the visible list |
+| `Enter` | Confirm the action, then the project, account, or task |
+| `1`–`6` | Jump to action N on the action menu |
+| `1`–`9` | Jump to item N in the target list |
+| `Esc` | Back to the action menu (from the target list) |
+| `q`, `Esc` | Quit (from the action menu) |
+
+A mode flag without `-p` (e.g. `preflight -remote`) skips the action menu
+and goes straight to the target list for that action.
 
 Folder browser (after selecting a project, unless `-path` is given):
 
@@ -193,9 +256,6 @@ Folder browser (after selecting a project, unless `-path` is given):
 | `←`, `Backspace`, `..` | Go up one level |
 | `→` | Descend into the highlighted folder |
 | `/` | Search folders and files anywhere under the project. The recursive index loads in the background, abbreviated segments work (`k/p/a` matches `kiosks/public_html/actions`), and ordered filters can narrow by path, type, extension, or contents. Arrows pick, `Enter` opens, `Alt+M` marks, `Alt+E` edits, and `Esc` returns to the list. `Tab` still autocompletes a plain path bash-style. |
-| `r` | Browse the **remote source** instead of syncing — download any file or folder from the server, including files the sync would ignore (see below) |
-| `u` | Browse **local files for upload** instead of syncing — upload anything, ignoring `.gitignore` (see below) |
-| `t` | Open an **interactive ssh shell** into the project's server using the account credentials (see below) |
 | `e` | Open the configured terminal **editor** on the entry under the cursor (see below) |
 | `q`, `Esc` | Quit |
 
@@ -215,7 +275,7 @@ filter before `%contents` to avoid opening unrelated files.
 `.php`, or glob forms such as `*.php`. Content matching is literal and
 case-sensitive.
 
-Remote source browser (press `r` in the folder browser, or run `godeploy -p <id> -remote`):
+Remote source browser (pick **Download** in the launcher, or run `preflight -p <id> -remote`):
 
 | Key | Action |
 |---|---|
@@ -230,9 +290,9 @@ Remote source browser (press `r` in the folder browser, or run `godeploy -p <id>
 | `/` | Filter the current folder's listing by name (files and folders; `Alt+M` marks the highlighted match, `Alt+E` edits it) |
 | `q`, `Esc` | Back to the folder selection |
 
-Remote downloads: nothing is filtered — files excluded by `.gitignore` or the project's `exclusions` are listed and downloadable. When a marked remote path sits under a `path_mapping`, it downloads to the project path (`local_root` + `local_path` + the suffix below the mapping root). Paths outside every mapping open a local folder picker (starting at `~`) and the absolute remote path is preserved under the chosen destination. A review list shows every file as `remote path → local destination`; `Enter` downloads with live progress, then `r` returns to the project picker and `b` re-opens the remote browser.
+Remote downloads: nothing is filtered — files excluded by `.gitignore` or the project's `exclusions` are listed and downloadable. When a marked remote path sits under a `path_mapping`, it downloads to the project path (`local_root` + `local_path` + the suffix below the mapping root). Paths outside every mapping open a local folder picker (starting at `~`) and the absolute remote path is preserved under the chosen destination. A review list shows every file as `remote path → local destination`; `Enter` downloads with live progress, then `r` returns to the launcher and `b` re-opens the remote browser.
 
-Local source browser (press `u` in the folder browser, or run `godeploy -p <id> -upload`):
+Local source browser (pick **Upload** in the launcher, or run `preflight -p <id> -upload`):
 
 | Key | Action |
 |---|---|
@@ -248,11 +308,11 @@ Local source browser (press `u` in the folder browser, or run `godeploy -p <id> 
 | `/` | Filter the current folder's listing by name (files and folders; `Alt+M` marks the highlighted match, `Alt+E` edits it) |
 | `q`, `Esc` | Back to the folder selection |
 
-Local uploads: the browser starts at the project's mapped local paths (each labeled with its remote target) and lists **everything** — `.gitignore` never hides a file here, so gitignored files upload too. Files and folders matching the project's `exclusions` are shown dimmed with a `⊘` marker; the `e` key toggles whether they are skipped when building the upload list (OFF by default — everything uploads). If a marked path itself matches an exclusion, the whole folder is excluded outright regardless of the toggle. When a marked local path sits under a `path_mapping`, it uploads to the mapped remote path (`remote_path` + the suffix below the mapping's local folder). Paths outside every mapping open a remote folder picker (starting at `/`) and the project-relative path is preserved under the chosen destination. A review list shows every file as `local path → remote path`; `Enter` uploads with live progress, then `r` returns to the project picker and `b` re-opens the local browser.
+Local uploads: the browser starts at the project's mapped local paths (each labeled with its remote target) and lists **everything** — `.gitignore` never hides a file here, so gitignored files upload too. Files and folders matching the project's `exclusions` are shown dimmed with a `⊘` marker; the `e` key toggles whether they are skipped when building the upload list (OFF by default — everything uploads). If a marked path itself matches an exclusion, the whole folder is excluded outright regardless of the toggle. When a marked local path sits under a `path_mapping`, it uploads to the mapped remote path (`remote_path` + the suffix below the mapping's local folder). Paths outside every mapping open a remote folder picker (starting at `/`) and the project-relative path is preserved under the chosen destination. A review list shows every file as `local path → remote path`; `Enter` uploads with live progress, then `r` returns to the launcher and `b` re-opens the local browser.
 
-Interactive shell (press `T` in the startup picker or Manage Accounts tab, press `t` in the folder browser, or run `godeploy -p <id> -shell`): godeploy exits the TUI and hands the terminal to the system `ssh` client with the account's host, port, username and key — the shell itself is a normal ssh session (prompts, pty, and Ctrl+C all handled by ssh). The startup Accounts list includes unlinked accounts. When the stored secret (`secrets.yaml`) covers the account, it is fed to ssh via `SSH_ASKPASS`; otherwise ssh prompts interactively. FTP/FTPS accounts remain visible but show an SFTP-only hint instead of opening a shell, and `-shell` cannot be combined with `-remote` or `-upload`. Exit the shell to return to the screen that launched it.
+Interactive shell (pick **SSH** in the launcher, press `T` on the Manage Accounts tab, or run `preflight -p <id> -shell`): preflight exits the TUI and hands the terminal to the system `ssh` client with the account's host, port, username and key — the shell itself is a normal ssh session (prompts, pty, and Ctrl+C all handled by ssh). The launcher SSH list includes unlinked accounts. When the stored secret (`secrets.yaml`) covers the account, it is fed to ssh via `SSH_ASKPASS`; otherwise ssh prompts interactively. FTP/FTPS accounts remain visible but show an SFTP-only hint instead of opening a shell, and `-shell` cannot be combined with `-remote` or `-upload`. Exit the shell to return to the screen that launched it.
 
-Editor (`e` in the folder browser, or run `godeploy -p <id>` with `editor: "hx"` set in config.yaml): the editor command is a plain command line (quotes honored, `~` expanded, no shell) — GUI editors that detach need a wait flag (e.g. `code --wait`). godeploy exits the TUI, hands the terminal to the editor on the file or folder under the cursor, and returns to the folder browser with your marks intact when you quit the editor. In the remote source browser, `e` on a remote file downloads it to a temp copy, opens it in the editor, **re-uploads on every save** (debounced ~0.4 s, watched via the file system), and uploads the final state when you quit. If the editor exits with an error and the file changed, the temp copy is kept for recovery and the remote is left at the last uploaded version. Leave `editor` empty to disable the editor keys.
+Editor (`e` in the folder browser, or run `preflight -p <id>` with `editor: "hx"` set in config.yaml): the editor command is a plain command line (quotes honored, `~` expanded, no shell) — GUI editors that detach need a wait flag (e.g. `code --wait`). preflight exits the TUI, hands the terminal to the editor on the file or folder under the cursor, and returns to the folder browser with your marks intact when you quit the editor. In the remote source browser, `e` on a remote file downloads it to a temp copy, opens it in the editor, **re-uploads on every save** (debounced ~0.4 s, watched via the file system), and uploads the final state when you quit. If the editor exits with an error and the file changed, the temp copy is kept for recovery and the remote is left at the last uploaded version. Leave `editor` empty to disable the editor keys.
 
 Sync review:
 
@@ -279,14 +339,14 @@ files, but not for files skipped because they are logs.
 | `i` | Ignore the file: adds it to the project's `exclusions` in config.yaml and removes it from the queue (no rescan needed) |
 | `PageUp` / `PageDown` | Page through the list, or scroll the diff when focused |
 | `Enter` | Execute selected plan |
-| `r` | After a deploy: back to the project picker |
+| `r` | After a deploy: back to the launcher |
 | `b` | After a deploy: back to the folder browser (same project, pick more folders) |
 | `q` | Quit |
 
 ## Structure
 
 ```text
-cmd/godeploy/              CLI entry point
+cmd/preflight/              CLI entry point
 internal/config/           YAML schema/loading
 internal/domain/           transport-independent types/interfaces
 internal/diff/             hashing/text normalization/unified diff
@@ -297,8 +357,9 @@ internal/remote/sftpclient SFTP/SSH implementation
 internal/remote/ftpclient  FTP/FTPS implementation
 internal/remotebrowser/   remote source browser (download outside sync)
 internal/syncer/           remote scan, planning, execution
-internal/manage/           interactive config manager TUI (-manage)
-internal/picker/           interactive project picker TUI
+internal/manage/           interactive config manager TUI (-manage / launcher Manage)
+internal/picker/           action-first startup launcher TUI
+internal/taskrun/          ordered remote-command task runner
 internal/tui/              Bubble Tea review UI
 docs/ARCHITECTURE.md        planning/execution rules and next milestones
 ```

@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"preflight/internal/git"
 )
 
 type searchFilterKind uint8
@@ -19,6 +21,7 @@ const (
 	searchByType
 	searchByExtension
 	searchByContents
+	searchByGit
 )
 
 type searchFilter struct {
@@ -80,6 +83,8 @@ func parseSearchQuery(query string) ([]searchFilter, error) {
 			if value != "" {
 				filters = append(filters, searchFilter{kind: searchByContents, value: value})
 			}
+		case "git", "status":
+			filters = append(filters, searchFilter{kind: searchByGit, value: value})
 		default:
 			return nil, fmt.Errorf("unknown filter %%%s", name)
 		}
@@ -188,6 +193,32 @@ func applySearchFilters(ctx context.Context, root string, dirs, files []string, 
 				}
 			}
 			results = matched
+		case searchByGit:
+			gitPaths, err := git.ChangedPaths(root, nil)
+			if err != nil {
+				return nil, fmt.Errorf("git: %w", err)
+			}
+			gitMap := make(map[string]bool, len(gitPaths))
+			for _, gp := range gitPaths {
+				gitMap[gp] = true
+			}
+			needle := strings.ToLower(strings.TrimSpace(filter.value))
+			results = keepSearchResults(results, func(result searchResult) bool {
+				if needle != "" && !strings.Contains(strings.ToLower(result.path), needle) {
+					return false
+				}
+				if gitMap[result.path] {
+					return true
+				}
+				if result.dir {
+					for gp := range gitMap {
+						if strings.HasPrefix(gp, result.path+"/") {
+							return true
+						}
+					}
+				}
+				return false
+			})
 		}
 	}
 	return results, nil

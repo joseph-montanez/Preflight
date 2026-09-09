@@ -14,8 +14,8 @@ import (
 	"sync"
 	"time"
 
-	"godeploy/internal/config"
-	"godeploy/internal/domain"
+	"preflight/internal/config"
+	"preflight/internal/domain"
 
 	ftp "github.com/jlaffaye/ftp"
 )

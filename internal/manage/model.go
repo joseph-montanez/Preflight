@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"godeploy/internal/config"
+	"preflight/internal/config"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -24,8 +24,8 @@ var (
 	inactiveTabStyle = lipgloss.NewStyle().Padding(0, 1)
 )
 
-// Model is the config manager TUI: a tabbed list of accounts and
-// projects with a modal form editor for each entry.
+// Model is the config manager TUI: a tabbed list of accounts, projects,
+// and tasks with a modal form editor for each entry.
 type confirmAction int
 
 const (
@@ -33,16 +33,19 @@ const (
 	confirmQuit
 	confirmDeleteAccount
 	confirmDeleteProject
+	confirmDeleteTask
 )
 
 type Model struct {
 	cfg            *config.Config
 	secrets        *config.Secrets
 	path           string
-	tab            int // 0 accounts, 1 projects
+	tab            int // 0 accounts, 1 projects, 2 tasks
 	cursor         int
 	form           *Form
 	mappings       *mappingEditor
+	steps          *stepEditor
+	stepsTarget    *[]config.TaskStep
 	confirm        string
 	confirmAct     confirmAction
 	status         string
@@ -89,6 +92,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			_ = err // async completion results never close the editor
 			return m, cmd
 		}
+		if m.steps != nil {
+			cmd, err := m.steps.Update(msg)
+			_ = err // apply/cancel results never close the editor directly
+			return m, cmd
+		}
 		if m.form != nil {
 			cmd, err := m.form.Update(msg)
 			_ = err // async results never close the form
@@ -118,9 +126,32 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return *m, cmd
 	}
 
+	if m.steps != nil {
+		cmd, err := m.steps.Update(msg)
+		switch {
+		case errors.Is(err, errStepsSaved):
+			if m.stepsTarget != nil {
+				*m.stepsTarget = m.steps.result
+			}
+			m.form.status = stepSummary(m.steps.result)
+			m.steps = nil
+		case errors.Is(err, errStepsCancel):
+			m.form.status = "step changes cancelled"
+			m.steps = nil
+		case err != nil:
+			m.status = err.Error()
+			m.steps = nil
+		}
+		return *m, cmd
+	}
+
 	if m.form != nil {
 		if key == "enter" && m.form.popup == nil && m.form.busy == "" && m.form.Fields[m.form.Cursor].Kind == KindEditor {
-			m.openMappingEditor()
+			if m.form.Fields[m.form.Cursor].Tag == tagSteps {
+				m.openStepsEditor()
+			} else {
+				m.openMappingEditor()
+			}
 			return *m, nil
 		}
 		cmd, err := m.form.Update(msg)
@@ -161,6 +192,8 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.doDeleteAccount()
 			case confirmDeleteProject:
 				m.doDeleteProject()
+			case confirmDeleteTask:
+				m.doDeleteTask()
 			}
 		case "n", "N":
 			if m.confirmAct == confirmQuit {
@@ -221,14 +254,16 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return *m, tea.Quit
 	case "enter":
 		m.editCurrent()
-	case "tab", "1", "2":
+	case "tab", "1", "2", "3":
 		switch key {
 		case "1":
 			m.tab = 0
 		case "2":
 			m.tab = 1
+		case "3":
+			m.tab = 2
 		default:
-			m.tab = 1 - m.tab
+			m.tab = (m.tab + 1) % 3
 		}
 		m.cursor = 0
 	case "up", "k":
@@ -248,10 +283,14 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) listLen() int {
-	if m.tab == 0 {
+	switch m.tab {
+	case 0:
 		return len(m.cfg.Accounts)
+	case 2:
+		return len(m.cfg.Tasks)
+	default:
+		return len(m.cfg.Projects)
 	}
-	return len(m.cfg.Projects)
 }
 
 // persist writes config.yaml and secrets.yaml to disk. It returns an
@@ -268,20 +307,30 @@ func (m *Model) persist() string {
 }
 
 func (m *Model) addNew() {
-	if m.tab == 0 {
+	switch m.tab {
+	case 0:
 		m.openAccountForm(-1)
-	} else {
+	case 2:
+		m.openTaskForm(-1)
+	default:
 		m.openProjectForm(-1)
 	}
 }
 
 func (m *Model) editCurrent() {
-	if m.tab == 0 {
+	switch m.tab {
+	case 0:
 		if m.cursor < len(m.cfg.Accounts) {
 			m.openAccountForm(m.cursor)
 		}
-	} else if m.cursor < len(m.cfg.Projects) {
-		m.openProjectForm(m.cursor)
+	case 2:
+		if m.cursor < len(m.cfg.Tasks) {
+			m.openTaskForm(m.cursor)
+		}
+	default:
+		if m.cursor < len(m.cfg.Projects) {
+			m.openProjectForm(m.cursor)
+		}
 	}
 }
 
@@ -297,11 +346,27 @@ func (m *Model) deleteCurrent() {
 				refs = append(refs, p.ID)
 			}
 		}
+		for _, t := range m.cfg.Tasks {
+			for _, s := range t.Steps {
+				if s.AccountID == acc.ID {
+					refs = append(refs, "task:"+t.ID)
+					break
+				}
+			}
+		}
 		m.confirm = fmt.Sprintf("delete account %s? [y/N]", acc.ID)
 		if len(refs) > 0 {
 			m.confirm = fmt.Sprintf("account %s is used by %s — delete anyway? [y/N]", acc.ID, strings.Join(refs, ", "))
 		}
 		m.confirmAct = confirmDeleteAccount
+		return
+	}
+	if m.tab == 2 {
+		if m.cursor >= len(m.cfg.Tasks) {
+			return
+		}
+		m.confirm = fmt.Sprintf("delete task %s? [y/N]", m.cfg.Tasks[m.cursor].ID)
+		m.confirmAct = confirmDeleteTask
 		return
 	}
 	if m.cursor >= len(m.cfg.Projects) {
@@ -335,6 +400,16 @@ func (m *Model) doDeleteProject() {
 	}
 }
 
+func (m *Model) doDeleteTask() {
+	m.cfg.Tasks = append(m.cfg.Tasks[:m.cursor], m.cfg.Tasks[m.cursor+1:]...)
+	m.clampCursor()
+	if errStr := m.persist(); errStr != "" {
+		m.status = errStr
+	} else {
+		m.status = "task deleted — written to " + filepath.Dir(m.path)
+	}
+}
+
 func (m *Model) clampCursor() {
 	if m.cursor >= m.listLen() {
 		m.cursor = m.listLen() - 1
@@ -346,10 +421,13 @@ func (m *Model) clampCursor() {
 
 func (m Model) View() string {
 	if m.width == 0 {
-		return "godeploy config manager: initializing..."
+		return "preflight config manager: initializing..."
 	}
 	if m.mappings != nil {
 		return m.mappings.View(m.width, m.height)
+	}
+	if m.steps != nil {
+		return m.steps.View(m.width, m.height)
 	}
 	if m.form != nil {
 		return m.form.View(m.width, m.height)
@@ -358,8 +436,8 @@ func (m Model) View() string {
 }
 
 func (m *Model) renderHeader() string {
-	tabs := make([]string, 0, 2)
-	for i, name := range []string{"Accounts", "Projects"} {
+	tabs := make([]string, 0, 3)
+	for i, name := range []string{"Accounts", "Projects", "Tasks"} {
 		if i == m.tab {
 			tabs = append(tabs, activeTabStyle.Render(name))
 		} else {
@@ -370,20 +448,28 @@ func (m *Model) renderHeader() string {
 	if m.dirty {
 		dirty = " " + accentStyle.Render("● unsaved")
 	}
-	header := headerStyle.Render(" godeploy ") + strings.Join(tabs, " ") + faintStyle.Render(" "+m.path) + dirty
+	header := headerStyle.Render(" preflight ") + strings.Join(tabs, " ") + faintStyle.Render(" "+m.path) + dirty
 	return truncate(header, m.width)
 }
 
 func (m *Model) renderList() string {
 	rows := []string{}
-	if m.tab == 0 {
+	switch m.tab {
+	case 0:
 		for i := range m.cfg.Accounts {
 			rows = append(rows, m.renderAccountRow(i))
 		}
 		if len(rows) == 0 {
 			rows = append(rows, faintStyle.Render("  no accounts — press n to add one"))
 		}
-	} else {
+	case 2:
+		for i := range m.cfg.Tasks {
+			rows = append(rows, m.renderTaskRow(i))
+		}
+		if len(rows) == 0 {
+			rows = append(rows, faintStyle.Render("  no tasks — press n to add one"))
+		}
+	default:
 		for i := range m.cfg.Projects {
 			rows = append(rows, m.renderProjectRow(i))
 		}
@@ -413,6 +499,28 @@ func (m *Model) renderAccountRow(i int) string {
 	return truncate(line, m.width)
 }
 
+func (m *Model) renderTaskRow(i int) string {
+	t := m.cfg.Tasks[i]
+	marker := "  "
+	if i == m.cursor {
+		marker = "▸ "
+	}
+	steps := "1 step"
+	if len(t.Steps) != 1 {
+		steps = fmt.Sprintf("%d steps", len(t.Steps))
+	}
+	accounts := make([]string, 0, len(t.Steps))
+	for _, s := range t.Steps {
+		accounts = append(accounts, s.AccountID)
+	}
+	line := fmt.Sprintf("%s%-16s %-22s %-8s %s",
+		marker, truncate(t.ID, 16), truncate(t.Name, 22), steps, truncate(strings.Join(accounts, ", "), 30))
+	if i == m.cursor {
+		return selectedStyle.Render(truncate(line, m.width))
+	}
+	return truncate(line, m.width)
+}
+
 func (m *Model) renderProjectRow(i int) string {
 	p := m.cfg.Projects[i]
 	marker := "  "
@@ -431,9 +539,9 @@ func (m *Model) renderStatus() string {
 	if m.confirm != "" {
 		return accentStyle.Render(m.confirm)
 	}
-	hints := "[Tab] Accounts/Projects  [Enter] Edit  [N] New  [D] Delete  [S] Save  [Q] Quit"
+	hints := "[Tab] Accounts/Projects/Tasks  [Enter] Edit  [N] New  [D] Delete  [S] Save  [Q] Quit"
 	if m.tab == 0 {
-		hints = "[Tab] Accounts/Projects  [Enter] Edit  [T] Shell  [N] New  [D] Delete  [S] Save  [Q] Quit"
+		hints = "[Tab] Accounts/Projects/Tasks  [Enter] Edit  [T] Shell  [N] New  [D] Delete  [S] Save  [Q] Quit"
 	}
 	if m.status != "" {
 		return faintStyle.Render(hints) + "  ·  " + m.status

@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"godeploy/internal/config"
-	"godeploy/internal/domain"
-	"godeploy/internal/remote"
+	"preflight/internal/config"
+	"preflight/internal/domain"
+	"preflight/internal/remote"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -514,5 +514,167 @@ func TestSplitRemote(t *testing.T) {
 		if base != c.base || last != c.last {
 			t.Fatalf("splitRemote(%q) = (%q, %q), want (%q, %q)", c.in, base, last, c.base, c.last)
 		}
+	}
+}
+
+func TestTasksTabCycle(t *testing.T) {
+	cfg := &config.Config{}
+	m := send(New(cfg, filepath.Join(t.TempDir(), "config.yaml")), tea.WindowSizeMsg{Width: 100, Height: 40})
+
+	m = sendKey(m, "tab") // projects
+	if m.(Model).tab != 1 {
+		t.Fatalf("tab = %d, want projects", m.(Model).tab)
+	}
+	m = sendKey(m, "tab") // tasks
+	if m.(Model).tab != 2 {
+		t.Fatalf("tab = %d, want tasks", m.(Model).tab)
+	}
+	m = sendKey(m, "tab") // back to accounts
+	if m.(Model).tab != 0 {
+		t.Fatalf("tab = %d, want accounts", m.(Model).tab)
+	}
+	m = sendKey(m, "3") // direct jump
+	if m.(Model).tab != 2 {
+		t.Fatalf("tab = %d, want tasks after 3", m.(Model).tab)
+	}
+}
+
+func taskTestConfig() *config.Config {
+	return &config.Config{
+		Accounts: []config.Account{
+			{ID: "kiosks", Protocol: "sftp", Host: "h", Port: 22, Auth: config.Auth{Type: "key", Username: "u"}},
+			{ID: "root", Protocol: "sftp", Host: "h", Port: 22, Auth: config.Auth{Type: "key", Username: "r"}},
+		},
+	}
+}
+
+func TestAddTaskAndSave(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	cfg := taskTestConfig()
+	m := send(New(cfg, path), tea.WindowSizeMsg{Width: 120, Height: 40})
+
+	m = sendKey(m, "3") // tasks tab
+	m = sendKey(m, "n")
+	if m.(Model).form == nil {
+		t.Fatal("expected task form to open")
+	}
+
+	m = sendKey(m, "deploy") // id
+	m = sendKey(m, "down")   // name
+	m = sendKey(m, "Deploy stuff")
+	m = sendKey(m, "down") // on error (leave stop)
+	m = sendKey(m, "down") // steps
+	m = sendKey(m, "enter")
+	if m.(Model).steps == nil {
+		t.Fatal("expected step editor to open")
+	}
+
+	m = sendKey(m, "kiosks") // account
+	m = sendKey(m, "tab")    // exact match moves to workdir
+	m = sendKey(m, "apiv2")
+	m = sendKey(m, "tab") // run column
+	m = sendKey(m, "make build")
+	m = sendKey(m, "tab") // shell column
+	m = sendKey(m, "bash -lc")
+	m = sendKey(m, "ctrl+n") // second row
+	m = sendKey(m, "root")
+	m = sendKey(m, "tab") // exact match moves to workdir (leave empty)
+	m = sendKey(m, "tab") // run column
+	m = sendKey(m, "supervisorctl restart apiv2")
+	m = sendKey(m, "enter") // apply
+
+	mm := m.(Model)
+	if mm.steps != nil {
+		t.Fatalf("step editor still open: %q", mm.steps.status)
+	}
+	if got := stepSummary([]config.TaskStep{{}, {}}); got != "2 steps" {
+		t.Fatalf("stepSummary = %q", got)
+	}
+
+	m = sendKey(m, "up") // leave the Steps row so enter saves
+	m = sendKey(m, "enter")
+
+	mm = m.(Model)
+	if mm.form != nil {
+		t.Fatalf("form still open: %q", mm.form.status)
+	}
+	if len(cfg.Tasks) != 1 {
+		t.Fatalf("task not saved: %+v", cfg.Tasks)
+	}
+	got := cfg.Tasks[0]
+	if got.ID != "deploy" || len(got.Steps) != 2 {
+		t.Fatalf("task mismatch: %+v", got)
+	}
+	if got.Steps[0].AccountID != "kiosks" || got.Steps[0].Workdir != "apiv2" || got.Steps[0].Run != "make build" || got.Steps[0].Shell != "bash -lc" {
+		t.Fatalf("step 1 mismatch: %+v", got.Steps[0])
+	}
+	if got.Steps[1].AccountID != "root" || got.Steps[1].Workdir != "" || got.Steps[1].Run != "supervisorctl restart apiv2" {
+		t.Fatalf("step 2 mismatch: %+v", got.Steps[1])
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "deploy") || !strings.Contains(string(data), "supervisorctl") {
+		t.Fatalf("config file missing task data:\n%s", data)
+	}
+}
+
+func TestAddTaskRejectsUnknownAccount(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	cfg := taskTestConfig()
+	m := send(New(cfg, path), tea.WindowSizeMsg{Width: 120, Height: 40})
+
+	m = sendKey(m, "3")
+	m = sendKey(m, "n")
+	m = sendKey(m, "bad")
+	m = sendKey(m, "down") // name
+	m = sendKey(m, "down") // on error
+	m = sendKey(m, "down") // steps
+	m = sendKey(m, "enter")
+	m = sendKey(m, "ghost") // unknown account (no completion match)
+	m = sendKey(m, "tab")
+	m = sendKey(m, "shift+tab") // shell column
+	m = sendKey(m, "shift+tab") // run column
+	m = sendKey(m, "doom")
+	m = sendKey(m, "enter") // apply (editor-level fields are filled)
+	m = sendKey(m, "up")
+	m = sendKey(m, "enter") // save attempt
+
+	mm := m.(Model)
+	if mm.form == nil {
+		t.Fatal("form should stay open when the account is unknown")
+	}
+	if len(cfg.Tasks) != 0 {
+		t.Fatalf("invalid task must not be saved: %+v", cfg.Tasks)
+	}
+}
+
+func TestDeleteTask(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	cfg := taskTestConfig()
+	cfg.Tasks = []config.Task{{ID: "gone", Steps: []config.TaskStep{{AccountID: "kiosks", Run: "x"}}}}
+	m := send(New(cfg, path), tea.WindowSizeMsg{Width: 120, Height: 40})
+
+	m = sendKey(m, "3")
+	m = sendKey(m, "d")
+	mm := m.(Model)
+	if mm.confirm == "" {
+		t.Fatal("expected delete confirmation")
+	}
+	m = sendKey(m, "y")
+	if len(cfg.Tasks) != 0 {
+		t.Fatalf("task not deleted: %+v", cfg.Tasks)
+	}
+}
+
+func TestDeleteAccountWarnsAboutTasks(t *testing.T) {
+	cfg := taskTestConfig()
+	cfg.Tasks = []config.Task{{ID: "deploy", Steps: []config.TaskStep{{AccountID: "kiosks", Run: "x"}}}}
+	m := send(New(cfg, filepath.Join(t.TempDir(), "config.yaml")), tea.WindowSizeMsg{Width: 120, Height: 40})
+
+	m = sendKey(m, "d") // delete kiosks (cursor 0)
+	if got := m.(Model).confirm; !strings.Contains(got, "task:deploy") {
+		t.Fatalf("confirm should name the task ref: %q", got)
 	}
 }

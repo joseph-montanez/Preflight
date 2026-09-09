@@ -6,7 +6,7 @@ import (
 	"path"
 	"path/filepath"
 
-	"godeploy/internal/domain"
+	"preflight/internal/domain"
 )
 
 // WalkRemote walks a remote directory recursively, calling onFile for

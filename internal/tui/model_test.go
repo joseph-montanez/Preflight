@@ -3,12 +3,14 @@ package tui
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
-	"godeploy/internal/domain"
-	"godeploy/internal/syncer"
+	"preflight/internal/domain"
+	"preflight/internal/syncer"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -572,5 +574,200 @@ func TestUploadModeDeployStatus(t *testing.T) {
 	}
 	if !strings.Contains(mm.status, "[b] browse local again") {
 		t.Fatalf("status = %q, want browse-local hint", mm.status)
+	}
+}
+
+func TestPullSectionKeyMergesSectionAndReloadsDiff(t *testing.T) {
+	dir := t.TempDir()
+	localFile := filepath.Join(dir, "main.go")
+	if err := os.WriteFile(localFile, []byte("package main\nfunc existing() {}\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	diffText := `--- /remote/main.go
++++ /local/main.go
+@@ -1,3 +1,2 @@
+ package main
+-func liveOnly() {}
+ func existing() {}
+`
+
+	testItem := &domain.SyncFileItem{
+		RelativePath: "main.go",
+		LocalPath:    localFile,
+		Action:       domain.ActionUpload,
+		DiffDetails: &domain.DiffResult{
+			Summary: "1 edit detected",
+			Unified: diffText,
+		},
+	}
+
+	loaderCalled := false
+	loader := func(it *domain.SyncFileItem) (*domain.DiffResult, error) {
+		loaderCalled = true
+		return &domain.DiffResult{Identical: true, Summary: "identical after normalization"}, nil
+	}
+
+	m := newModel([]*domain.SyncFileItem{testItem}).WithDiffLoader(loader)
+	m.width, m.height = 100, 24
+	m.focusDiff = true
+	m.refreshDiff()
+
+	// Press 'p' to pull active section
+	updated, cmd := m.Update(key("p"))
+	m = updated.(Model)
+
+	// Verify local file now contains liveOnly
+	content, err := os.ReadFile(localFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(content), "func liveOnly() {}") {
+		t.Fatalf("local file was not updated with live function:\n%s", string(content))
+	}
+
+	if cmd == nil {
+		t.Fatal("expected diff reload command, got nil")
+	}
+
+	// Execute cmd to produce diffReloadedMsg
+	msg := cmd()
+	reloaded, _ := m.Update(msg)
+	mm := reloaded.(Model)
+
+	if !loaderCalled {
+		t.Fatal("expected diff loader to be called")
+	}
+
+	if testItem.Action != domain.ActionSkip {
+		t.Fatalf("item action should be ActionSkip when diff becomes identical, got %v", testItem.Action)
+	}
+
+	if !strings.Contains(mm.status, "file now matches remote (skipped)") {
+		t.Fatalf("unexpected status: %q", mm.status)
+	}
+}
+
+func TestPullSectionMouseClickOnZone(t *testing.T) {
+	dir := t.TempDir()
+	localFile := filepath.Join(dir, "main.go")
+	if err := os.WriteFile(localFile, []byte("package main\nfunc existing() {}\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	diffText := `--- /remote/main.go
++++ /local/main.go
+@@ -1,3 +1,2 @@
+ package main
+-func liveOnly() {}
+ func existing() {}
+`
+
+	testItem := &domain.SyncFileItem{
+		RelativePath: "main.go",
+		LocalPath:    localFile,
+		Action:       domain.ActionUpload,
+		DiffDetails: &domain.DiffResult{
+			Summary: "1 edit detected",
+			Unified: diffText,
+		},
+	}
+
+	m := newModel([]*domain.SyncFileItem{testItem})
+	m.width, m.height = 120, 30
+	m.focusDiff = true
+	m.refreshDiff()
+
+	// Render view so zones are scanned
+	view := m.View()
+	if !strings.Contains(view, "[→]") {
+		t.Fatalf("view should contain [→] button:\n%s", view)
+	}
+
+	// Wait for bubblezone scanner worker to process setChan
+	time.Sleep(20 * time.Millisecond)
+
+	zone := m.zones.Get("pull-hunk-0")
+	if zone == nil {
+		t.Fatal("zone pull-hunk-0 should be registered")
+	}
+
+	// Click on the zone
+	mouseMsg := tea.MouseMsg{
+		Button: tea.MouseButtonLeft,
+		Action: tea.MouseActionPress,
+		X:      zone.StartX,
+		Y:      zone.StartY,
+	}
+	updated, _ := m.Update(mouseMsg)
+	m = updated.(Model)
+
+	// Verify local file now contains liveOnly
+	content, err := os.ReadFile(localFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(content), "func liveOnly() {}") {
+		t.Fatalf("local file was not updated after mouse click on pull button:\n%s", string(content))
+	}
+}
+
+func TestPullSectionPreservesScrollOffset(t *testing.T) {
+	testItem := &domain.SyncFileItem{
+		RelativePath: "main.go",
+		Action:       domain.ActionUpload,
+		DiffDetails: &domain.DiffResult{
+			Summary: "1 edit detected",
+			Unified: sampleUnifiedDiff,
+		},
+	}
+	m := newModel([]*domain.SyncFileItem{testItem})
+	m.width, m.height = 100, 24
+	m.viewport.Height = 3
+	m.refreshDiff()
+
+	m.viewport.SetYOffset(2)
+	msg := diffReloadedMsg{
+		item:    testItem,
+		details: testItem.DiffDetails,
+		yOffset: 2,
+	}
+	updated, _ := m.Update(msg)
+	mm := updated.(Model)
+	if mm.viewport.YOffset != 2 {
+		t.Fatalf("viewport YOffset = %d, want 2", mm.viewport.YOffset)
+	}
+}
+
+func TestWordWrapToggle(t *testing.T) {
+	testItem := &domain.SyncFileItem{
+		RelativePath: "main.go",
+		Action:       domain.ActionUpload,
+		DiffDetails: &domain.DiffResult{
+			Summary: "1 edit detected",
+			Unified: sampleUnifiedDiff,
+		},
+	}
+	m := newModel([]*domain.SyncFileItem{testItem})
+	if !m.wordWrap {
+		t.Fatal("wordWrap should default to true")
+	}
+
+	updated := sendKey(m, "w")
+	mm := updated.(Model)
+	if mm.wordWrap {
+		t.Fatal("wordWrap should be toggled off")
+	}
+	if !strings.Contains(mm.status, "word wrap disabled") {
+		t.Fatalf("status = %q, want disabled message", mm.status)
+	}
+
+	updated = sendKey(mm, "w")
+	mm = updated.(Model)
+	if !mm.wordWrap {
+		t.Fatal("wordWrap should be toggled back on")
+	}
+	if !strings.Contains(mm.status, "word wrap enabled") {
+		t.Fatalf("status = %q, want enabled message", mm.status)
 	}
 }

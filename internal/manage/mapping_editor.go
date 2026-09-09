@@ -6,8 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"godeploy/internal/config"
-	"godeploy/internal/pathcomp"
+	"preflight/internal/config"
+	"preflight/internal/pathcomp"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"

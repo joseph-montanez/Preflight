@@ -4,10 +4,10 @@ import (
 	"fmt"
 	"strings"
 
-	"godeploy/internal/config"
-	"godeploy/internal/domain"
-	"godeploy/internal/remote/ftpclient"
-	"godeploy/internal/remote/sftpclient"
+	"preflight/internal/config"
+	"preflight/internal/domain"
+	"preflight/internal/remote/ftpclient"
+	"preflight/internal/remote/sftpclient"
 )
 
 type SecretPrompt func(label string) (string, error)

@@ -1,4 +1,4 @@
-module godeploy
+module preflight
 
 go 1.25.0
 

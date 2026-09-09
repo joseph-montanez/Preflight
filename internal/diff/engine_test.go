@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"godeploy/internal/domain"
+	"preflight/internal/domain"
 )
 
 func TestNormalizeText(t *testing.T) {

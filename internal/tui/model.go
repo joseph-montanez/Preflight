@@ -3,12 +3,14 @@ package tui
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"time"
 
-	"godeploy/internal/domain"
-	"godeploy/internal/syncer"
+	"preflight/internal/diff"
+	"preflight/internal/domain"
+	"preflight/internal/syncer"
 
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/viewport"
@@ -29,6 +31,13 @@ type DiffLoaderFunc func(*domain.SyncFileItem) (*domain.DiffResult, error)
 // IgnoreFunc adds a project-relative path to the project's exclusions in
 // config.yaml (and to the running ignore engine).
 type IgnoreFunc func(projectPath string) error
+
+type diffReloadedMsg struct {
+	item    *domain.SyncFileItem
+	details *domain.DiffResult
+	yOffset int
+	err     error
+}
 
 type progressMsg struct {
 	stage string
@@ -115,8 +124,12 @@ type Model struct {
 	focusDiff    bool
 	viewport     viewport.Model
 	zones        *zone.Manager
-	forcedDiffs  map[*domain.SyncFileItem]struct{}
-	loadingDiffs map[*domain.SyncFileItem]struct{}
+	forcedDiffs         map[*domain.SyncFileItem]struct{}
+	loadingDiffs        map[*domain.SyncFileItem]struct{}
+	currentSections     []diff.ChangeSection
+	currentSectionsFile *domain.SyncFileItem
+	activeSection       int
+	wordWrap            bool
 
 	confirming bool
 	running    bool
@@ -176,6 +189,7 @@ func New(projectName, remoteRoot, connection string, mode domain.DiffMode, build
 		retainedSkips: make(map[*domain.SyncFileItem]struct{}),
 		forcedDiffs:   make(map[*domain.SyncFileItem]struct{}),
 		loadingDiffs:  make(map[*domain.SyncFileItem]struct{}),
+		wordWrap:      true,
 	}
 	if build != nil {
 		m.scanning = true
@@ -296,6 +310,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.status = "showing full diff"
 		m.refreshDiff()
 		return m, nil
+	case diffReloadedMsg:
+		if msg.err != nil {
+			m.status = "diff reload failed: " + msg.err.Error()
+			return m, nil
+		}
+		msg.item.DiffDetails = msg.details
+		if msg.details != nil && msg.details.Identical {
+			msg.item.Action = domain.ActionSkip
+			m.status = fmt.Sprintf("pulled section into %s — file now matches remote (skipped)", displayPath(msg.item))
+		} else if msg.details != nil {
+			m.status = fmt.Sprintf("pulled section into %s — diff reloaded (%s)", displayPath(msg.item), msg.details.Summary)
+		} else {
+			m.status = fmt.Sprintf("pulled section into %s", displayPath(msg.item))
+		}
+		m.rebuildFiltered()
+		m.refreshDiffPreserveOffset(msg.yOffset)
+		return m, nil
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		m.resize()
@@ -310,6 +341,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m.handleKey(msg)
 	case tea.MouseMsg:
+		if msg.Button == tea.MouseButtonLeft && (msg.Action == tea.MouseActionPress || msg.Action == 0) {
+			for i := 0; i < len(m.currentSections); i++ {
+				zone := m.zones.Get(fmt.Sprintf("pull-hunk-%d", i))
+				if zone != nil && zone.InBounds(msg) {
+					return m.pullSection(i)
+				}
+			}
+		}
 		if !m.focusDiff {
 			switch msg.Button {
 			case tea.MouseButtonWheelUp:
@@ -377,6 +416,25 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.resize()
 	case "v":
 		return m.forceCurrentDiff()
+	case "p", "P":
+		return m.pullActiveSection()
+	case "w", "W":
+		m.wordWrap = !m.wordWrap
+		if m.wordWrap {
+			m.status = "word wrap enabled"
+		} else {
+			m.status = "word wrap disabled (truncated)"
+		}
+		m.refreshDiff()
+		return *m, nil
+	case "]":
+		if m.focusDiff {
+			return m.nextSection()
+		}
+	case "[":
+		if m.focusDiff {
+			return m.prevSection()
+		}
 	case "up", "k":
 		if !m.focusDiff {
 			m.moveCursor(-1)
@@ -488,7 +546,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m Model) View() string {
 	if m.width == 0 {
-		return "godeploy: initializing..."
+		return "preflight: initializing..."
 	}
 	if m.scanning || m.scanErr != nil {
 		return m.scanView()
@@ -500,7 +558,7 @@ func (m Model) View() string {
 	case TransferUpload:
 		header = headerStyle.Render(fmt.Sprintf("Project: %s | Uploading to: %s | Connection: %s", m.projectName, m.remoteRoot, m.connection))
 	}
-	toolbar := "Actions: [U]pload [D]ownload [X] Delete [S]kip [I]gnore | [F]ilter: pending/all | [Tab] Pane | [Space] Cycle | [Enter] Deploy"
+	toolbar := "Actions: [U]pload [D]ownload [X] Delete [S]kip [I]gnore | [P]ull | [W] Wrap | [F]ilter: pending/all | [Tab] Pane | [Space] Cycle | [Enter] Deploy"
 	switch m.transferMode {
 	case TransferDownload:
 		toolbar = "Downloads: [Space] skip file | [Enter] Download | [Q] quit"
@@ -516,7 +574,7 @@ func (m Model) View() string {
 		case TransferUpload:
 			toolbar = "Destination: local file → remote path | [Tab] Back to files | [Up/Down] Scroll | [PgUp/PgDown] Page"
 		default:
-			toolbar = "Diff: REMOTE (left) | LOCAL (right) | [Tab] Back to files | [Up/Down] Scroll | [PgUp/PgDown] Page"
+			toolbar = "Diff: REMOTE (left) | LOCAL (right) | Click [→] or [P] pull section | [W] Wrap | [Tab] Back to files | [Up/Down] Scroll | [PgUp/PgDown] Page"
 		}
 		if item := m.currentItem(); m.isOversizedDiff(item) && !m.isForcedDiff(item) {
 			toolbar += " | [V] View anyway"
@@ -688,26 +746,126 @@ func (m *Model) clampOffset() {
 }
 
 func (m *Model) refreshDiff() {
+	m.refreshDiffPreserveOffset(0)
+	m.viewport.GotoTop()
+}
+
+func (m *Model) refreshDiffPreserveOffset(yOffset int) {
 	item := m.currentItem()
 	if item == nil {
+		m.currentSections = nil
+		m.currentSectionsFile = nil
+		m.activeSection = 0
 		m.viewport.SetContent("No differences found.")
 		return
 	}
 	content := displayPath(item) + "\n\n"
 	if item.DiffDetails != nil {
 		if m.isOversizedDiff(item) && !m.isForcedDiff(item) {
+			m.currentSections = nil
+			m.currentSectionsFile = nil
+			m.activeSection = 0
 			if summary := item.DiffDetails.Summary; summary != "" && summary != "(diff too large)" {
 				content += summary + "\n\n"
 			}
 			content += "(diff too large)\n\nPress [v] to view anyway."
 		} else if item.DiffDetails.Unified != "" {
-			content = renderSplitDiff(displayPath(item), item.DiffDetails.Summary, item.DiffDetails.Unified, m.viewport.Width)
+			_, sections := parseUnifiedDiff(item.DiffDetails.Unified)
+			m.currentSections = sections
+			m.currentSectionsFile = item
+			if m.activeSection >= len(sections) {
+				m.activeSection = max(0, len(sections)-1)
+			}
+			content = renderSplitDiff(displayPath(item), item.DiffDetails.Summary, item.DiffDetails.Unified, m.viewport.Width, m.wordWrap, m.zones)
 		} else {
+			m.currentSections = nil
+			m.currentSectionsFile = nil
+			m.activeSection = 0
 			content += item.DiffDetails.Summary
 		}
+	} else {
+		m.currentSections = nil
+		m.currentSectionsFile = nil
+		m.activeSection = 0
 	}
 	m.viewport.SetContent(content)
-	m.viewport.GotoTop()
+	if yOffset > 0 {
+		m.viewport.SetYOffset(yOffset)
+	}
+}
+
+func (m *Model) pullActiveSection() (tea.Model, tea.Cmd) {
+	if len(m.currentSections) == 0 {
+		m.status = "no diff sections available to pull"
+		return *m, nil
+	}
+	if m.activeSection < 0 || m.activeSection >= len(m.currentSections) {
+		m.activeSection = 0
+	}
+	return m.pullSection(m.activeSection)
+}
+
+func (m *Model) nextSection() (tea.Model, tea.Cmd) {
+	if len(m.currentSections) == 0 {
+		return *m, nil
+	}
+	m.activeSection = (m.activeSection + 1) % len(m.currentSections)
+	m.status = fmt.Sprintf("section %d of %d", m.activeSection+1, len(m.currentSections))
+	return *m, nil
+}
+
+func (m *Model) prevSection() (tea.Model, tea.Cmd) {
+	if len(m.currentSections) == 0 {
+		return *m, nil
+	}
+	m.activeSection = (m.activeSection - 1 + len(m.currentSections)) % len(m.currentSections)
+	m.status = fmt.Sprintf("section %d of %d", m.activeSection+1, len(m.currentSections))
+	return *m, nil
+}
+
+func (m *Model) pullSection(sectionIdx int) (tea.Model, tea.Cmd) {
+	if m.running || m.scanning {
+		return *m, nil
+	}
+	item := m.currentItem()
+	if item == nil {
+		return *m, nil
+	}
+	if item.LocalPath == "" {
+		m.status = "pull failed: no local path for " + displayPath(item)
+		return *m, nil
+	}
+	if sectionIdx < 0 || sectionIdx >= len(m.currentSections) {
+		return *m, nil
+	}
+
+	sec := m.currentSections[sectionIdx]
+	if err := diff.ApplySection(item.LocalPath, sec); err != nil {
+		m.status = "pull failed: " + err.Error()
+		return *m, nil
+	}
+
+	if info, err := os.Stat(item.LocalPath); err == nil {
+		if item.LocalStat == nil {
+			item.LocalStat = &domain.FileMeta{Exists: true}
+		}
+		item.LocalStat.Size = info.Size()
+		item.LocalStat.ModTime = info.ModTime()
+	}
+
+	yOffset := m.viewport.YOffset
+	if m.loadDiff != nil {
+		loader := m.loadDiff
+		m.status = fmt.Sprintf("pulling section into %s…", displayPath(item))
+		return *m, func() tea.Msg {
+			details, err := loader(item)
+			return diffReloadedMsg{item: item, details: details, yOffset: yOffset, err: err}
+		}
+	}
+
+	m.status = fmt.Sprintf("pulled section into %s", displayPath(item))
+	m.refreshDiffPreserveOffset(yOffset)
+	return *m, nil
 }
 
 func (m *Model) forceCurrentDiff() (tea.Model, tea.Cmd) {

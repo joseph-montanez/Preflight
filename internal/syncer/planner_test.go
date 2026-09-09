@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"godeploy/internal/config"
-	diffengine "godeploy/internal/diff"
-	"godeploy/internal/domain"
+	"preflight/internal/config"
+	diffengine "preflight/internal/diff"
+	"preflight/internal/domain"
 )
 
 type fakeInfo struct {
@@ -352,3 +352,111 @@ func TestPlannerFileScopeNewRemote(t *testing.T) {
 		t.Fatalf("LocalPath = %q", items[0].LocalPath)
 	}
 }
+
+func TestPlannerFileScopeDeletedLocal(t *testing.T) {
+	dir := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(dir, "public"), 0o755)
+	// file does not exist locally (deleted)
+	client := newMemClient()
+	client.files["/srv/deleted.txt"] = []byte("still on remote")
+	p := &Planner{
+		Project: config.Project{
+			LocalRoot:       dir,
+			DefaultDiffMode: "text",
+			PathMappings:    []config.PathMapping{{LocalPath: "public", RemotePath: "/srv"}},
+		},
+		Client: client,
+		Diff:   diffengine.NewEngine(),
+		Scopes: []string{"public/deleted.txt"},
+	}
+	items, err := p.Build()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].Action != domain.ActionDownload {
+		t.Fatalf("items = %+v, want one download (remote only)", items)
+	}
+	if items[0].RemotePath != "/srv/deleted.txt" {
+		t.Fatalf("RemotePath = %q, want /srv/deleted.txt", items[0].RemotePath)
+	}
+}
+
+func TestPlannerMultiScopeSkipsUnmapped(t *testing.T) {
+	dir := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(dir, "public"), 0o755)
+	_ = os.MkdirAll(filepath.Join(dir, "unmapped"), 0o755)
+	_ = os.WriteFile(filepath.Join(dir, "public", "app.js"), []byte("js"), 0o644)
+	_ = os.WriteFile(filepath.Join(dir, "unmapped", "skip.txt"), []byte("skip"), 0o644)
+
+	client := newMemClient()
+	p := &Planner{
+		Project: config.Project{
+			LocalRoot:       dir,
+			DefaultDiffMode: "text",
+			PathMappings:    []config.PathMapping{{LocalPath: "public", RemotePath: "/srv"}},
+		},
+		Client: client,
+		Diff:   diffengine.NewEngine(),
+		Scopes: []string{"public/app.js", "unmapped/skip.txt"},
+	}
+	items, err := p.Build()
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("len(items) = %d, want 1", len(items))
+	}
+	wantLocal := filepath.Join(dir, "public", "app.js")
+	if items[0].LocalPath != wantLocal {
+		t.Fatalf("LocalPath = %q, want %q", items[0].LocalPath, wantLocal)
+	}
+	if items[0].RemotePath != "/srv/app.js" {
+		t.Fatalf("RemotePath = %q, want /srv/app.js", items[0].RemotePath)
+	}
+}
+
+func TestPlannerSingleScopeUnmappedErrors(t *testing.T) {
+	dir := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(dir, "unmapped"), 0o755)
+	_ = os.WriteFile(filepath.Join(dir, "unmapped", "skip.txt"), []byte("skip"), 0o644)
+
+	client := newMemClient()
+	p := &Planner{
+		Project: config.Project{
+			LocalRoot:       dir,
+			DefaultDiffMode: "text",
+			PathMappings:    []config.PathMapping{{LocalPath: "public", RemotePath: "/srv"}},
+		},
+		Client: client,
+		Diff:   diffengine.NewEngine(),
+		Scopes: []string{"unmapped/skip.txt"},
+	}
+	_, err := p.Build()
+	if err == nil || !strings.Contains(err.Error(), "not covered by a path_mapping") {
+		t.Fatalf("expected error containing 'not covered by a path_mapping', got %v", err)
+	}
+}
+
+func TestPlannerMultiScopeAllUnmappedErrors(t *testing.T) {
+	dir := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(dir, "unmapped"), 0o755)
+	_ = os.WriteFile(filepath.Join(dir, "unmapped", "a.txt"), []byte("a"), 0o644)
+	_ = os.WriteFile(filepath.Join(dir, "unmapped", "b.txt"), []byte("b"), 0o644)
+
+	client := newMemClient()
+	p := &Planner{
+		Project: config.Project{
+			LocalRoot:       dir,
+			DefaultDiffMode: "text",
+			PathMappings:    []config.PathMapping{{LocalPath: "public", RemotePath: "/srv"}},
+		},
+		Client: client,
+		Diff:   diffengine.NewEngine(),
+		Scopes: []string{"unmapped/a.txt", "unmapped/b.txt"},
+	}
+	_, err := p.Build()
+	if err == nil || !strings.Contains(err.Error(), "no selected paths are covered by a path_mapping") {
+		t.Fatalf("expected error containing 'no selected paths are covered by a path_mapping', got %v", err)
+	}
+}
+
