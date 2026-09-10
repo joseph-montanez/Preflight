@@ -18,12 +18,14 @@ var (
 )
 
 type stepInputRow struct {
-	inputs [4]textinput.Model // account, workdir, run, shell
+	inputs [5]textinput.Model // account, workdir/local, command/remote, shell, kind
 }
 
-// stepEditor is a focused, row-based editor for task steps. The account
-// column completes from the configured SFTP account ids; workdir and run
-// are free text. Enter applies, Esc cancels.
+// stepEditor is a focused, row-based editor for task steps. Columns stay
+// account-first so run entry matches the old flow; the trailing kind
+// column selects run vs upload. Run rows use workdir/command/shell;
+// upload rows reuse those columns as local/remote with a blank shell.
+// Enter applies, Esc cancels.
 type stepEditor struct {
 	accounts []string
 	rows     []stepInputRow
@@ -40,40 +42,52 @@ type stepEditor struct {
 func newStepEditor(steps []config.TaskStep, accounts []string) *stepEditor {
 	editor := &stepEditor{accounts: accounts}
 	for _, step := range steps {
-		editor.rows = append(editor.rows, newStepInputRow(step.AccountID, step.Workdir, step.Run, step.Shell))
+		if step.IsUpload() {
+			editor.rows = append(editor.rows, newStepInputRow(
+				step.AccountID, step.Upload, step.Remote, "", config.TaskStepUpload))
+		} else {
+			editor.rows = append(editor.rows, newStepInputRow(
+				step.AccountID, step.Workdir, step.Run, step.Shell, config.TaskStepRun))
+		}
 	}
 	if len(editor.rows) == 0 {
-		editor.rows = append(editor.rows, newStepInputRow("", "", "", ""))
+		editor.rows = append(editor.rows, newStepInputRow("", "", "", "", ""))
 	}
 	editor.focus()
 	return editor
 }
 
-func newStepInputRow(account, workdir, run, shell string) stepInputRow {
+func newStepInputRow(account, middle1, middle2, shell, kind string) stepInputRow {
 	accountInput := textinput.New()
 	accountInput.Prompt = ""
 	accountInput.CharLimit = 256
 	accountInput.Placeholder = "account"
 	accountInput.SetValue(account)
 
-	workdirInput := textinput.New()
-	workdirInput.Prompt = ""
-	workdirInput.CharLimit = 1024
-	workdirInput.Placeholder = "workdir (optional)"
-	workdirInput.SetValue(workdir)
+	middle1Input := textinput.New()
+	middle1Input.Prompt = ""
+	middle1Input.CharLimit = 1024
+	middle1Input.Placeholder = "workdir / local"
+	middle1Input.SetValue(middle1)
 
-	runInput := textinput.New()
-	runInput.Prompt = ""
-	runInput.CharLimit = 4096
-	runInput.Placeholder = "make build"
-	runInput.SetValue(run)
+	middle2Input := textinput.New()
+	middle2Input.Prompt = ""
+	middle2Input.CharLimit = 4096
+	middle2Input.Placeholder = "command / remote"
+	middle2Input.SetValue(middle2)
 
 	shellInput := textinput.New()
 	shellInput.Prompt = ""
 	shellInput.CharLimit = 256
-	shellInput.Placeholder = "shell, e.g. bash -lc (optional)"
+	shellInput.Placeholder = "shell, e.g. bash -lc (run only)"
 	shellInput.SetValue(shell)
-	return stepInputRow{inputs: [4]textinput.Model{accountInput, workdirInput, runInput, shellInput}}
+
+	kindInput := textinput.New()
+	kindInput.Prompt = ""
+	kindInput.CharLimit = 16
+	kindInput.Placeholder = "run"
+	kindInput.SetValue(kind)
+	return stepInputRow{inputs: [5]textinput.Model{accountInput, middle1Input, middle2Input, shellInput, kindInput}}
 }
 
 func (e *stepEditor) focus() {
@@ -98,13 +112,13 @@ func (e *stepEditor) moveRow(delta int) {
 }
 
 func (e *stepEditor) setColumn(column int) {
-	e.column = min(max(0, column), 3)
+	e.column = min(max(0, column), 4)
 	e.popup = nil
 	e.focus()
 }
 
 func (e *stepEditor) addRow() {
-	row := newStepInputRow("", "", "", "")
+	row := newStepInputRow("", "", "", "", "")
 	insertAt := min(e.cursor+1, len(e.rows))
 	e.rows = append(e.rows, stepInputRow{})
 	copy(e.rows[insertAt+1:], e.rows[insertAt:])
@@ -162,9 +176,14 @@ func (e *stepEditor) setCurrentValue(value string) {
 // completeAccount offers the configured account ids matching the current
 // account cell. One match fills it (a second Tab on the exact match moves
 // to the workdir column); several open a picker popup; empty shows all.
+// On the trailing kind column, Tab toggles run/upload instead.
 func (e *stepEditor) completeAccount() {
+	if e.column == 4 {
+		e.completeKind()
+		return
+	}
 	if e.column != 0 {
-		e.setColumn((e.column + 1) % 4)
+		e.setColumn((e.column + 1) % 5)
 		return
 	}
 	prefix := e.currentValue()
@@ -185,6 +204,20 @@ func (e *stepEditor) completeAccount() {
 	default:
 		e.popup, e.popupAt = matches, 0
 	}
+}
+
+// completeKind toggles the kind cell between run and upload and stays
+// put, so repeated Tab flips it back. An empty cell (the run default)
+// becomes upload first so Tab discovers the alternative.
+func (e *stepEditor) completeKind() {
+	switch strings.ToLower(strings.TrimSpace(e.currentValue())) {
+	case config.TaskStepUpload:
+		e.setCurrentValue(config.TaskStepRun)
+	default:
+		e.setCurrentValue(config.TaskStepUpload)
+	}
+	e.status = ""
+	e.focus()
 }
 
 func (e *stepEditor) Update(msg tea.Msg) (tea.Cmd, error) {
@@ -231,7 +264,7 @@ func (e *stepEditor) handleKey(msg tea.KeyMsg) (tea.Cmd, error) {
 		e.completeAccount()
 		return nil, nil
 	case "shift+tab":
-		e.setColumn((e.column + 3) % 4)
+		e.setColumn((e.column + 4) % 5)
 		return nil, nil
 	case "up":
 		e.moveRow(-1)
@@ -243,7 +276,7 @@ func (e *stepEditor) handleKey(msg tea.KeyMsg) (tea.Cmd, error) {
 		e.setColumn(0)
 		return nil, nil
 	case "ctrl+right":
-		e.setColumn(3)
+		e.setColumn(4)
 		return nil, nil
 	case "ctrl+n":
 		e.addRow()
@@ -274,26 +307,45 @@ func (e *stepEditor) typeInto(msg tea.KeyMsg) (tea.Cmd, error) {
 	return cmd, nil
 }
 
-// validSteps drops fully blank rows and requires an account and a command
-// on the rest. Account existence and protocol are checked when the task
-// form saves.
+// validSteps drops fully blank rows and maps the rest to run or upload
+// steps by the kind cell (empty means run). The editor shape enforces
+// the ISP split structurally: run rows carry workdir/command/shell,
+// upload rows carry local/remote with a blank shell. Account existence
+// and protocol are checked when the task form saves.
 func (e *stepEditor) validSteps() ([]config.TaskStep, error) {
 	var steps []config.TaskStep
 	for i := range e.rows {
 		account := strings.TrimSpace(e.rows[i].inputs[0].Value())
-		workdir := strings.TrimSpace(e.rows[i].inputs[1].Value())
-		run := strings.TrimSpace(e.rows[i].inputs[2].Value())
+		middle1 := strings.TrimSpace(e.rows[i].inputs[1].Value())
+		middle2 := strings.TrimSpace(e.rows[i].inputs[2].Value())
 		shell := strings.TrimSpace(e.rows[i].inputs[3].Value())
-		if account == "" && workdir == "" && run == "" && shell == "" {
+		kind := strings.ToLower(strings.TrimSpace(e.rows[i].inputs[4].Value()))
+		if account == "" && middle1 == "" && middle2 == "" && shell == "" && kind == "" {
 			continue
 		}
 		if account == "" {
 			return nil, fmt.Errorf("row %d: account is required", i+1)
 		}
-		if run == "" {
-			return nil, fmt.Errorf("row %d: command is required", i+1)
+		switch kind {
+		case "", config.TaskStepRun:
+			if middle2 == "" {
+				return nil, fmt.Errorf("row %d: command is required", i+1)
+			}
+			steps = append(steps, config.TaskStep{AccountID: account, Workdir: middle1, Run: middle2, Shell: shell})
+		case config.TaskStepUpload:
+			if middle1 == "" {
+				return nil, fmt.Errorf("row %d: local path is required", i+1)
+			}
+			if middle2 == "" {
+				return nil, fmt.Errorf("row %d: remote path is required", i+1)
+			}
+			if shell != "" {
+				return nil, fmt.Errorf("row %d: shell applies to run steps only", i+1)
+			}
+			steps = append(steps, config.TaskStep{AccountID: account, Upload: middle1, Remote: middle2})
+		default:
+			return nil, fmt.Errorf("row %d: kind must be run or upload", i+1)
 		}
-		steps = append(steps, config.TaskStep{AccountID: account, Workdir: workdir, Run: run, Shell: shell})
 	}
 	return steps, nil
 }
@@ -304,11 +356,12 @@ func (e *stepEditor) View(width, height int) string {
 	contentWidth := boxWidth - 4
 	separator := " │ "
 	prefixWidth := 5
-	columnsWidth := contentWidth - prefixWidth - 3*lipgloss.Width(separator)
-	accountWidth := columnsWidth / 5
-	workdirWidth := columnsWidth / 5
-	shellWidth := columnsWidth / 5
-	runWidth := columnsWidth - accountWidth - workdirWidth - shellWidth
+	columnsWidth := contentWidth - prefixWidth - 4*lipgloss.Width(separator)
+	accountWidth := columnsWidth * 2 / 10
+	middle1Width := columnsWidth * 2 / 10
+	shellWidth := columnsWidth * 2 / 10
+	kindWidth := columnsWidth / 10
+	middle2Width := columnsWidth - accountWidth - middle1Width - shellWidth - kindWidth
 
 	popupRows := min(12, max(4, height-10))
 	maxRows := max(1, height-11)
@@ -325,18 +378,20 @@ func (e *stepEditor) View(width, height int) string {
 
 	rows := []string{
 		titleStyle.Render(" Task steps"),
-		faintStyle.Render(" One command per row, in run order. Tab completes the account."),
-		fmt.Sprintf("%-*s%s%-*s%s%-*s%s%-*s", prefixWidth+accountWidth, "    ACCOUNT", separator,
-			workdirWidth, "WORKDIR", separator, runWidth, "COMMAND", separator, shellWidth, "SHELL"),
+		faintStyle.Render(" One command or upload per row, in run order. Tab completes the account; Tab on KIND toggles run/upload."),
+		fmt.Sprintf("%-*s%s%-*s%s%-*s%s%-*s%s%-*s", prefixWidth+accountWidth, "    ACCOUNT", separator,
+			middle1Width, "WORKDIR/LOCAL", separator, middle2Width, "COMMAND/REMOTE", separator,
+			shellWidth, "SHELL", separator, kindWidth, "KIND"),
 	}
 	if len(e.rows) == 0 {
 		rows = append(rows, faintStyle.Render("     No steps — Ctrl+N adds one."))
 	}
 	for i := e.offset; i < end; i++ {
 		e.rows[i].inputs[0].Width = max(6, accountWidth)
-		e.rows[i].inputs[1].Width = max(6, workdirWidth)
-		e.rows[i].inputs[2].Width = max(8, runWidth)
+		e.rows[i].inputs[1].Width = max(6, middle1Width)
+		e.rows[i].inputs[2].Width = max(8, middle2Width)
 		e.rows[i].inputs[3].Width = max(6, shellWidth)
+		e.rows[i].inputs[4].Width = max(4, kindWidth)
 		marker := "  "
 		if i == e.cursor {
 			marker = "▸ "
@@ -344,9 +399,10 @@ func (e *stepEditor) View(width, height int) string {
 		prefix := fmt.Sprintf("%s%2d ", marker, i+1)
 		line := prefix +
 			truncate(e.rows[i].inputs[0].View(), accountWidth) + faintStyle.Render(separator) +
-			truncate(e.rows[i].inputs[1].View(), workdirWidth) + faintStyle.Render(separator) +
-			truncate(e.rows[i].inputs[2].View(), runWidth) + faintStyle.Render(separator) +
-			truncate(e.rows[i].inputs[3].View(), shellWidth)
+			truncate(e.rows[i].inputs[1].View(), middle1Width) + faintStyle.Render(separator) +
+			truncate(e.rows[i].inputs[2].View(), middle2Width) + faintStyle.Render(separator) +
+			truncate(e.rows[i].inputs[3].View(), shellWidth) + faintStyle.Render(separator) +
+			truncate(e.rows[i].inputs[4].View(), kindWidth)
 		rows = append(rows, truncate(line, contentWidth))
 		if i == e.cursor && e.popup != nil {
 			rows = append(rows, strings.Repeat(" ", prefixWidth)+e.renderPopup(contentWidth-prefixWidth-4, popupRows))

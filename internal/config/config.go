@@ -191,18 +191,80 @@ type Task struct {
 	Steps   []TaskStep `yaml:"steps"`
 }
 
-// TaskStep runs one command on an account. Workdir is entered with cd
-// before Run so a step like `cd apiv2` never has to be spelled out, and
-// consecutive steps on the same account share nothing except what the
-// commands themselves persist on the server. Shell optionally wraps the
-// step in another interpreter, e.g. `bash -lc` for a login shell that
-// sources ~/.bash_profile (plain ssh exec does not, so profile PATH
-// entries like a Go install are otherwise missing).
+// TaskStep runs one command on an account, or uploads one file to it.
+// A run step sets Run (Workdir is entered with cd before Run, and Shell
+// optionally wraps the step in another interpreter, e.g. `bash -lc` for
+// a login shell). An upload step sets Upload (local source) and Remote
+// (absolute remote destination) instead; exactly one of Run / Upload is
+// required, and Workdir/Shell are run-only.
 type TaskStep struct {
 	AccountID string `yaml:"account_id"`
 	Workdir   string `yaml:"workdir,omitempty"`
-	Run       string `yaml:"run"`
+	Run       string `yaml:"run,omitempty"`
 	Shell     string `yaml:"shell,omitempty"`
+	Upload    string `yaml:"upload,omitempty"`
+	Remote    string `yaml:"remote,omitempty"`
+}
+
+// Step kinds. A step is an upload step when Upload is set, otherwise a
+// run step. Kind centralizes the discrimination so validation, the
+// runner, and the editor agree on it (SRP: shape knowledge lives here).
+const (
+	TaskStepRun    = "run"
+	TaskStepUpload = "upload"
+)
+
+// Kind reports the step kind from its set fields.
+func (s TaskStep) Kind() string {
+	if strings.TrimSpace(s.Upload) != "" {
+		return TaskStepUpload
+	}
+	return TaskStepRun
+}
+
+// IsUpload reports whether the step uploads a file.
+func (s TaskStep) IsUpload() bool { return s.Kind() == TaskStepUpload }
+
+// Validate checks the step's own shape against its account. Task-level
+// concerns (ids, account existence) stay in ValidateTasks; protocol and
+// field rules live here so every caller shares them.
+func (s TaskStep) Validate(account Account, taskID string, index int) error {
+	prefix := fmt.Sprintf("task %q steps[%d]", taskID, index)
+	hasRun := strings.TrimSpace(s.Run) != ""
+	hasUpload := strings.TrimSpace(s.Upload) != ""
+	hasRemote := strings.TrimSpace(s.Remote) != ""
+	switch {
+	case !hasRun && !hasUpload:
+		return fmt.Errorf("%s.run is required", prefix)
+	case hasRun && hasUpload:
+		return fmt.Errorf("%s: run and upload are mutually exclusive", prefix)
+	}
+	if hasUpload {
+		if !hasRemote {
+			return fmt.Errorf("%s.remote is required", prefix)
+		}
+		if !strings.HasPrefix(strings.TrimSpace(s.Remote), "/") {
+			return fmt.Errorf("%s.remote must be an absolute path", prefix)
+		}
+		if strings.TrimSpace(s.Workdir) != "" || strings.TrimSpace(s.Shell) != "" {
+			return fmt.Errorf("%s: workdir/shell apply to run steps only", prefix)
+		}
+		switch strings.ToLower(strings.TrimSpace(account.Protocol)) {
+		case "sftp", "ftp", "ftps":
+		default:
+			return fmt.Errorf("%s: account %q uses %q, only sftp/ftp/ftps accounts can upload files",
+				prefix, account.ID, account.Protocol)
+		}
+		return nil
+	}
+	if hasRemote {
+		return fmt.Errorf("%s.remote requires upload", prefix)
+	}
+	if !strings.EqualFold(account.Protocol, "sftp") {
+		return fmt.Errorf("%s: account %q uses %q, only sftp accounts can run commands",
+			prefix, account.ID, account.Protocol)
+	}
+	return nil
 }
 
 // ContinueOnError reports whether a failing step lets later steps run.
@@ -235,16 +297,12 @@ func (c *Config) ValidateTasks() error {
 		}
 		for j := range task.Steps {
 			step := &task.Steps[j]
-			if strings.TrimSpace(step.Run) == "" {
-				return fmt.Errorf("task %q steps[%d].run is required", task.ID, j)
-			}
 			account, err := c.Account(step.AccountID)
 			if err != nil {
 				return fmt.Errorf("task %q steps[%d]: %w", task.ID, j, err)
 			}
-			if !strings.EqualFold(account.Protocol, "sftp") {
-				return fmt.Errorf("task %q steps[%d]: account %q uses %q, only sftp accounts can run commands",
-					task.ID, j, account.ID, account.Protocol)
+			if err := step.Validate(*account, task.ID, j); err != nil {
+				return err
 			}
 		}
 	}

@@ -49,10 +49,12 @@ projects:
       - "vendor/"
       - "storage/logs/*.log"
 
-# Named multi-step remote command tasks (run configurations). Pick Run in
-# the launcher or run `preflight -run <id>`. Steps run in order over SFTP
-# accounts (FTP has no shell); workdir is entered with cd before run, and a
-# failing step stops the run unless on_error is "continue".
+# Named multi-step remote tasks (run configurations). Pick Run in the
+# launcher or run `preflight -run <id>`. Steps run in order: a run step
+# executes a command over an SFTP account (FTP has no shell), while an
+# upload step streams one local file to an absolute remote path (SFTP or
+# FTP/FTPS). Workdir is entered with cd before run, and a failing step
+# stops the run unless on_error is "continue".
 tasks:
   - id: "deploy-apiv2"
     name: "Build apiv2 and restart"
@@ -63,3 +65,14 @@ tasks:
         run: "make build"
       - account_id: "prod-web"
         run: "supervisorctl restart apiv2"
+  - id: "deploy-binary"
+    name: "Stop, upload, restart"
+    on_error: "stop"
+    steps:
+      - account_id: "prod-web"
+        run: "systemctl --user stop apiv2"
+      - account_id: "prod-web"
+        upload: "dist/apiv2.bin"
+        remote: "/opt/apiv2/apiv2.bin"
+      - account_id: "prod-web"
+        run: "systemctl --user start apiv2"

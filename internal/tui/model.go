@@ -486,6 +486,8 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.cycleDelete()
 	case "s":
 		m.setAction(domain.ActionSkip)
+	case "S":
+		m.skipAll()
 	case "c":
 		if m.transferMode != TransferSync {
 			m.status = m.onlyLabel() + " — nothing to configure"
@@ -558,12 +560,12 @@ func (m Model) View() string {
 	case TransferUpload:
 		header = headerStyle.Render(fmt.Sprintf("Project: %s | Uploading to: %s | Connection: %s", m.projectName, m.remoteRoot, m.connection))
 	}
-	toolbar := "Actions: [U]pload [D]ownload [X] Delete [S]kip [I]gnore | [P]ull | [W] Wrap | [F]ilter: pending/all | [Tab] Pane | [Space] Cycle | [Enter] Deploy"
+	toolbar := "Actions: [U]pload [D]ownload [X] Delete [S]kip (Shift+S all) [I]gnore | [P]ull | [W] Wrap | [F]ilter: pending/all | [Tab] Pane | [Space] Cycle | [Enter] Deploy"
 	switch m.transferMode {
 	case TransferDownload:
-		toolbar = "Downloads: [Space] skip file | [Enter] Download | [Q] quit"
+		toolbar = "Downloads: [Space] skip file | [Shift+S] skip all | [Enter] Download | [Q] quit"
 	case TransferUpload:
-		toolbar = "Uploads: [Space] skip file | [Enter] Upload | [Q] quit"
+		toolbar = "Uploads: [Space] skip file | [Shift+S] skip all | [Enter] Upload | [Q] quit"
 	}
 	bodyHeight := max(8, m.height-6)
 	var body string
@@ -1003,6 +1005,23 @@ func (m *Model) setAction(action domain.ActionType) {
 	m.afterAction(item)
 }
 
+func (m *Model) skipAll() {
+	if len(m.items) == 0 {
+		return
+	}
+	if m.retainedSkips == nil {
+		m.retainedSkips = make(map[*domain.SyncFileItem]struct{})
+	}
+	for _, item := range m.items {
+		item.Action = domain.ActionSkip
+		m.retainedSkips[item] = struct{}{}
+	}
+	m.rebuildFiltered()
+	m.refreshDiff()
+	m.status = "marked all as skip"
+}
+
+
 func (m Model) hasDeletes() bool {
 	for _, item := range m.items {
 		if item.Action == domain.ActionDeleteLocal || item.Action == domain.ActionDeleteRemote {
@@ -1129,11 +1148,18 @@ func transferLabel(state syncer.Event) string {
 // displayPath renders the file's path in the review UI, qualified by its
 // scope when the deploy covers multiple folders.
 func displayPath(item *domain.SyncFileItem) string {
-	if item.Scope == "" {
-		return item.RelativePath
+	scope := strings.TrimSuffix(item.Scope, "/")
+	rel := strings.TrimPrefix(item.RelativePath, "/")
+	rel = strings.TrimSuffix(rel, "/")
+	if scope == "" {
+		return rel
 	}
-	return item.Scope + "/" + item.RelativePath
+	if rel == "" {
+		return scope
+	}
+	return scope + "/" + rel
 }
+
 
 func actionLabel(action domain.ActionType) string {
 	switch action {

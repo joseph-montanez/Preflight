@@ -34,7 +34,7 @@ func (m *Model) openTaskForm(idx int) {
 		{Tag: tagID, Kind: KindText, Label: "ID", Value: task.ID, Placeholder: "deploy-apiv2"},
 		{Tag: tagName, Kind: KindText, Label: "Name", Value: task.Name, Placeholder: "Build apiv2 and restart"},
 		{Tag: tagOnError, Kind: KindSelect, Label: "On error", Value: task.OnError, Options: []string{"stop", "continue"}, Hint: "stop aborts later steps"},
-		{Tag: tagSteps, Kind: KindEditor, Label: "Steps", Hint: "Enter to edit commands", Display: func(string) string {
+		{Tag: tagSteps, Kind: KindEditor, Label: "Steps", Hint: "Enter to edit commands/uploads", Display: func(string) string {
 			return stepSummary(*stepsPtr)
 		}},
 	}
@@ -74,22 +74,34 @@ func (m *Model) openStepsEditor() {
 	if m.form == nil || m.stepsTarget == nil {
 		return
 	}
+	// Offer every account: run steps need SFTP but upload steps work on
+	// FTP/FTPS too; per-step protocol is enforced when the form saves.
 	accounts := make([]string, 0, len(m.cfg.Accounts))
 	for _, a := range m.cfg.Accounts {
-		if strings.EqualFold(a.Protocol, "sftp") {
-			accounts = append(accounts, a.ID)
-		}
+		accounts = append(accounts, a.ID)
 	}
 	m.steps = newStepEditor(*m.stepsTarget, accounts)
 }
 
 func stepSummary(steps []config.TaskStep) string {
+	uploads := 0
+	for _, step := range steps {
+		if step.IsUpload() {
+			uploads++
+		}
+	}
 	switch len(steps) {
 	case 0:
 		return "(none)"
 	case 1:
+		if uploads == 1 {
+			return "1 upload"
+		}
 		return "1 step"
 	default:
+		if uploads > 0 {
+			return fmt.Sprintf("%d steps (%d upload)", len(steps), uploads)
+		}
 		return fmt.Sprintf("%d steps", len(steps))
 	}
 }

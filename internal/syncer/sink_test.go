@@ -74,3 +74,25 @@ func TestTransferSinkScopeKeying(t *testing.T) {
 		t.Fatalf("missing web/index.php in %v", states)
 	}
 }
+
+func TestEventKeyCleanPath(t *testing.T) {
+	tests := []struct {
+		scope    string
+		path     string
+		expected string
+	}{
+		{"api.php", "", "api.php"},
+		{"api.php/", "", "api.php"},
+		{"web", "api.php", "web/api.php"},
+		{"web/", "/api.php/", "web/api.php"},
+		{"", "api.php", "api.php"},
+		{"", "api.php/", "api.php"},
+	}
+
+	for _, tt := range tests {
+		got := EventKey(tt.scope, tt.path)
+		if got != tt.expected {
+			t.Fatalf("EventKey(%q, %q) = %q, want %q", tt.scope, tt.path, got, tt.expected)
+		}
+	}
+}

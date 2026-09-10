@@ -3,10 +3,13 @@ package taskrun
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
+	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"preflight/internal/config"
 	"preflight/internal/domain"
@@ -90,6 +93,77 @@ var (
 	_ domain.RemoteClient = (*fakeClient)(nil)
 	_ domain.Execer       = (*fakeClient)(nil)
 	_ domain.RemoteClient = (*shellLess)(nil)
+	_ StepExecutor        = commandExecutor{}
+	_ StepExecutor        = uploadExecutor{}
+)
+
+// memFile is an in-memory LocalFile for upload tests.
+type memFile struct {
+	*bytes.Reader
+	info memFileInfo
+}
+
+func (m *memFile) Close() error { return nil }
+
+func (m *memFile) Stat() (os.FileInfo, error) { return m.info, nil }
+
+type memFileInfo struct{ modTime time.Time }
+
+func (i memFileInfo) Name() string       { return "mem" }
+func (i memFileInfo) Size() int64        { return 0 }
+func (i memFileInfo) Mode() fs.FileMode  { return 0o644 }
+func (i memFileInfo) ModTime() time.Time { return i.modTime }
+func (i memFileInfo) IsDir() bool        { return false }
+func (i memFileInfo) Sys() any           { return nil }
+
+func openMem(content string) OpenFunc {
+	return func(string) (LocalFile, error) {
+		return &memFile{Reader: bytes.NewReader([]byte(content))}, nil
+	}
+}
+
+// captureClient records uploads: writers per path, mkdirs, renames.
+type captureClient struct {
+	fakeClient
+	writes  map[string]*bytes.Buffer
+	mkdir   []string
+	renamed [][2]string
+	times   map[string]time.Time
+}
+
+func newCaptureClient() *captureClient {
+	return &captureClient{writes: map[string]*bytes.Buffer{}, times: map[string]time.Time{}}
+}
+
+func (c *captureClient) OpenWriter(path string) (io.WriteCloser, error) {
+	buf := &bytes.Buffer{}
+	c.writes[path] = buf
+	return nopWriteCloser{buf}, nil
+}
+
+func (c *captureClient) MkdirAll(path string) error {
+	c.mkdir = append(c.mkdir, path)
+	return nil
+}
+
+func (c *captureClient) Rename(oldPath, newPath string) error {
+	c.renamed = append(c.renamed, [2]string{oldPath, newPath})
+	if buf, ok := c.writes[oldPath]; ok {
+		c.writes[newPath] = buf
+		delete(c.writes, oldPath)
+	}
+	return nil
+}
+
+func (c *captureClient) Chtimes(path string, _, mtime time.Time) error {
+	c.times[path] = mtime
+	return nil
+}
+
+var (
+	_ domain.RemoteClient   = (*captureClient)(nil)
+	_ domain.RenameCapable  = (*captureClient)(nil)
+	_ domain.ChtimesCapable = (*captureClient)(nil)
 )
 
 func TestComposeCommand(t *testing.T) {
@@ -274,3 +348,128 @@ func TestRunRejectsShellLessClient(t *testing.T) {
 		t.Fatalf("shell-less client should error clearly: %+v, %v", results, err)
 	}
 }
+
+func TestExecutorFor(t *testing.T) {
+	tests := []struct {
+		name string
+		step config.TaskStep
+		want string
+	}{
+		{name: "run step", step: config.TaskStep{AccountID: "a", Run: "make"}, want: "taskrun.commandExecutor"},
+		{name: "upload step", step: config.TaskStep{AccountID: "a", Upload: "f", Remote: "/srv/f"}, want: "taskrun.uploadExecutor"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := executorFor(tt.step, nil)
+			if typ := fmt.Sprintf("%T", got); typ != tt.want {
+				t.Fatalf("executorFor(%+v) = %s, want %s", tt.step, typ, tt.want)
+			}
+		})
+	}
+}
+
+func TestExecutorCommand(t *testing.T) {
+	run := config.TaskStep{AccountID: "a", Workdir: "apiv2", Run: "make build"}
+	if got := (commandExecutor{}).Command(run); got != "cd 'apiv2' && make build" {
+		t.Fatalf("commandExecutor.Command = %q", got)
+	}
+	up := config.TaskStep{AccountID: "a", Upload: "dist/a", Remote: "/srv/a"}
+	if got := (uploadExecutor{}).Command(up); got != "↑ dist/a → /srv/a" {
+		t.Fatalf("uploadExecutor.Command = %q", got)
+	}
+}
+
+func TestRunUploadInterleaved(t *testing.T) {
+	cap := newCaptureClient()
+	r := &rig{byAccount: map[string]domain.RemoteClient{"k": cap}, dials: map[string]int{}}
+	task := config.Task{ID: "deploy", Steps: []config.TaskStep{
+		{AccountID: "k", Run: "stop"},
+		{AccountID: "k", Upload: "dist/app.bin", Remote: "/opt/app/app.bin"},
+		{AccountID: "k", Run: "start"},
+	}}
+	runner := &Runner{Lookup: r.lookup, Connect: r.connect, Open: openMem("binary-bytes")}
+	var out bytes.Buffer
+	results, err := runner.Run(task, &out)
+	if err != nil {
+		t.Fatalf("Run = %v, want nil", err)
+	}
+	if len(results) != 3 {
+		t.Fatalf("results = %d, want 3", len(results))
+	}
+	for i, result := range results {
+		if result.Err != nil || result.Skipped {
+			t.Fatalf("step %d should succeed: %+v", i+1, result)
+		}
+	}
+	if r.dials["k"] != 1 {
+		t.Fatalf("dials = %d, want one connection reused across run and upload", r.dials["k"])
+	}
+	got := ""
+	if buf, ok := cap.writes["/opt/app/app.bin"]; ok {
+		got = buf.String()
+	}
+	if got != "binary-bytes" {
+		t.Fatalf("remote content = %q, want %q", got, "binary-bytes")
+	}
+	if len(cap.mkdir) != 1 || cap.mkdir[0] != "/opt/app" {
+		t.Fatalf("mkdirs = %v, want [/opt/app]", cap.mkdir)
+	}
+	if len(cap.renamed) != 1 || cap.renamed[0] != [2]string{"/opt/app/app.bin.preflight-tmp", "/opt/app/app.bin"} {
+		t.Fatalf("renames = %v, want tmp rename", cap.renamed)
+	}
+	text := out.String()
+	for _, want := range []string{"▸ [k] $ stop", "▸ [k] ↑ dist/app.bin → /opt/app/app.bin", "✓ step 2 ok", `task "deploy" ok (3/3 steps)`} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("output missing %q:\n%s", want, text)
+		}
+	}
+}
+
+func TestRunUploadMissingLocalStops(t *testing.T) {
+	r := &rig{byAccount: map[string]domain.RemoteClient{}, dials: map[string]int{}}
+	task := config.Task{ID: "deploy", Steps: []config.TaskStep{
+		{AccountID: "k", Upload: "dist/missing.bin", Remote: "/srv/missing.bin"},
+		{AccountID: "k", Run: "echo never"},
+	}}
+	runner := &Runner{Lookup: r.lookup, Connect: r.connect, Open: func(string) (LocalFile, error) {
+		return nil, os.ErrNotExist
+	}}
+	var out bytes.Buffer
+	results, err := runner.Run(task, &out)
+	if err == nil {
+		t.Fatal("Run should return the upload error")
+	}
+	if !results[0].Failed() || !strings.Contains(results[0].Err.Error(), "open local") {
+		t.Fatalf("step 1 should fail opening the local file: %+v", results[0])
+	}
+	if !results[1].Skipped || results[1].Err != nil {
+		t.Fatalf("step 2 should be skipped without error: %+v", results[1])
+	}
+}
+
+func TestRunUploadFailureContinues(t *testing.T) {
+	r := &rig{byAccount: map[string]domain.RemoteClient{}, dials: map[string]int{}}
+	r.byAccount["k"] = &failWriter{err: errors.New("disk full")}
+	task := config.Task{ID: "c", OnError: "continue", Steps: []config.TaskStep{
+		{AccountID: "k", Run: "good one"},
+		{AccountID: "k", Upload: "dist/a", Remote: "/srv/a"},
+		{AccountID: "k", Run: "good two"},
+	}}
+	runner := &Runner{Lookup: r.lookup, Connect: r.connect, Open: openMem("x")}
+	var out bytes.Buffer
+	results, err := runner.Run(task, &out)
+	if err == nil {
+		t.Fatal("Run should return the first error even when continuing")
+	}
+	if len(results) != 3 || !results[1].Failed() || results[0].Err != nil || results[2].Err != nil {
+		t.Fatalf("continue should run all steps with middle failing: %+v", results)
+	}
+}
+
+// failWriter fails OpenWriter while allowing Exec to succeed.
+type failWriter struct {
+	fakeClient
+	err error
+}
+
+func (f *failWriter) OpenWriter(string) (io.WriteCloser, error) { return nil, f.err }

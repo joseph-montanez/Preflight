@@ -1,6 +1,7 @@
 package syncer
 
 import (
+	"strings"
 	"sync"
 	"time"
 
@@ -44,10 +45,16 @@ type TransferSnapshot struct {
 }
 
 // EventKey identifies a file across scopes: scope/path (or just path when
-// the scope is the project root).
+// the scope is the project root, or scope when path is empty).
 func EventKey(scope, path string) string {
+	scope = strings.TrimSuffix(scope, "/")
+	path = strings.TrimPrefix(path, "/")
+	path = strings.TrimSuffix(path, "/")
 	if scope == "" {
 		return path
+	}
+	if path == "" {
+		return scope
 	}
 	return scope + "/" + path
 }

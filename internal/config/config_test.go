@@ -113,6 +113,33 @@ func TestValidateTasks(t *testing.T) {
 		{name: "ftp account rejected", tasks: []Task{{ID: "f",
 			Steps: []TaskStep{{AccountID: "ftp1", Run: "x"}}}},
 			wantErr: `task "f" steps[0]: account "ftp1" uses "ftp", only sftp accounts can run commands`},
+		{name: "run plus remote rejected", tasks: []Task{{ID: "r",
+			Steps: []TaskStep{{AccountID: "sftp1", Run: "x", Remote: "/srv/x"}}}},
+			wantErr: `task "r" steps[0].remote requires upload`},
+		{name: "run and upload exclusive", tasks: []Task{{ID: "b",
+			Steps: []TaskStep{{AccountID: "sftp1", Run: "x", Upload: "f", Remote: "/srv/f"}}}},
+			wantErr: `task "b" steps[0]: run and upload are mutually exclusive`},
+		{name: "upload needs remote", tasks: []Task{{ID: "m",
+			Steps: []TaskStep{{AccountID: "sftp1", Upload: "dist/a"}}}},
+			wantErr: `task "m" steps[0].remote is required`},
+		{name: "upload remote absolute", tasks: []Task{{ID: "a",
+			Steps: []TaskStep{{AccountID: "sftp1", Upload: "dist/a", Remote: "srv/a"}}}},
+			wantErr: `task "a" steps[0].remote must be an absolute path`},
+		{name: "upload rejects workdir", tasks: []Task{{ID: "w",
+			Steps: []TaskStep{{AccountID: "sftp1", Upload: "dist/a", Remote: "/srv/a", Workdir: "x"}}}},
+			wantErr: `task "w" steps[0]: workdir/shell apply to run steps only`},
+		{name: "upload rejects shell", tasks: []Task{{ID: "s",
+			Steps: []TaskStep{{AccountID: "sftp1", Upload: "dist/a", Remote: "/srv/a", Shell: "bash -lc"}}}},
+			wantErr: `task "s" steps[0]: workdir/shell apply to run steps only`},
+		{name: "upload on sftp", tasks: []Task{{ID: "u",
+			Steps: []TaskStep{{AccountID: "sftp1", Upload: "dist/a", Remote: "/srv/a"}}}}, wantErr: ""},
+		{name: "upload on ftp", tasks: []Task{{ID: "uf",
+			Steps: []TaskStep{{AccountID: "ftp1", Upload: "dist/a", Remote: "/srv/a"}}}}, wantErr: ""},
+		{name: "mixed run upload run", tasks: []Task{{ID: "mix", Steps: []TaskStep{
+			{AccountID: "sftp1", Run: "stop"},
+			{AccountID: "sftp1", Upload: "dist/a", Remote: "/srv/a"},
+			{AccountID: "sftp1", Run: "start"},
+		}}}, wantErr: ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -128,6 +155,28 @@ func TestValidateTasks(t *testing.T) {
 				if err.Error() != tt.wantErr {
 					t.Fatalf("ValidateTasks() = %q, want %q", err.Error(), tt.wantErr)
 				}
+			}
+		})
+	}
+}
+
+func TestTaskStepKind(t *testing.T) {
+	tests := []struct {
+		name string
+		step TaskStep
+		want string
+	}{
+		{name: "run by default", step: TaskStep{AccountID: "a", Run: "x"}, want: TaskStepRun},
+		{name: "upload when set", step: TaskStep{AccountID: "a", Upload: "f", Remote: "/srv/f"}, want: TaskStepUpload},
+		{name: "blank upload is run", step: TaskStep{AccountID: "a", Upload: "  ", Run: "x"}, want: TaskStepRun},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.step.Kind(); got != tt.want {
+				t.Fatalf("Kind() = %q, want %q", got, tt.want)
+			}
+			if got := tt.step.IsUpload(); got != (tt.want == TaskStepUpload) {
+				t.Fatalf("IsUpload() = %v, want %v", got, tt.want == TaskStepUpload)
 			}
 		})
 	}
@@ -313,4 +362,3 @@ func TestIsMappingCovered(t *testing.T) {
 		t.Error("client/src dir should NOT be covered")
 	}
 }
-

@@ -177,13 +177,34 @@ tasks:
         run: "supervisorctl restart apiv2"
 ```
 
-Steps run in order over SFTP accounts (FTP has no shell and is rejected).
+Steps run in order. A step is either a **run** step (a command over SFTP —
+FTP has no shell and is rejected for these) or an **upload** step (one
+local file streamed to an absolute remote path, on SFTP or FTP/FTPS):
+
+```yaml
+  - id: "deploy-binary"
+    name: "Stop, upload, restart"
+    on_error: "stop"
+    steps:
+      - account_id: "kiosks"
+        run: "systemctl --user stop apiv2"
+      - account_id: "kiosks"
+        upload: "dist/apiv2.bin"        # local path (~ and relative resolved where preflight runs)
+        remote: "/opt/apiv2/apiv2.bin"  # absolute remote destination
+      - account_id: "kiosks"
+        run: "systemctl --user start apiv2"
+```
+
 `workdir` is entered with `cd` before `run`, so consecutive steps share
 nothing except what the commands themselves persist on the server. One
 connection opens per account and is reused across its steps; output streams
-live under a `▸ [account] $ command` header per step. A failing step stops
+live under a `▸ [account] $ command` header per run step and a
+`▸ [account] ↑ local → remote` header per upload step. A failing step stops
 the run unless `on_error` is `"continue"`, and the exit status names the
 failing step. Steps are non-interactive: no sudo prompts, no TTY, no stdin.
+Uploads create the remote parent directory, write atomically via a
+temporary file plus rename when the server supports it, and preserve the
+local modification time when it can.
 Remote `ssh exec` does not source login profiles, so profile `PATH` entries
 (like a Go install) are missing by default — set `shell: "bash -lc"` on the
 step to run it in a login shell:
@@ -196,9 +217,12 @@ step to run it in a login shell:
 ```
 
 Manage tasks on the manager's **Tasks** tab (`Enter` on the Steps row opens
-the step editor: `Tab` completes the account, `Ctrl+N`/`Ctrl+D` add/remove
-rows, `Ctrl+↑`/`Ctrl+↓` reorder, `Enter` applies; the SHELL column holds an
-optional interpreter like `bash -lc`).
+the step editor: `Tab` on the KIND column toggles run/upload, `Tab` on the
+account column completes it, `Ctrl+N`/`Ctrl+D` add/remove
+rows, `Ctrl+↑`/`Ctrl+↓` reorder, `Enter` applies; upload rows use the
+WORKDIR/LOCAL column for the local path and COMMAND/REMOTE for the remote
+path, while the SHELL column holds an optional interpreter like `bash -lc`
+for run steps).
 
 Build:
 
@@ -336,6 +360,7 @@ files, but not for files skipped because they are logs.
 | `d` | Download |
 | `x` | Delete local/remote |
 | `s` | Skip (the row stays visible so the choice can be reversed without rescanning) |
+| `S` | Mark every file as skip (same reversible skip, applied to the whole list) |
 | `i` | Ignore the file: adds it to the project's `exclusions` in config.yaml and removes it from the queue (no rescan needed) |
 | `PageUp` / `PageDown` | Page through the list, or scroll the diff when focused |
 | `Enter` | Execute selected plan |

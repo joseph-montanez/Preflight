@@ -101,6 +101,87 @@ func TestSkipStaysVisibleAndCanBeReversed(t *testing.T) {
 	}
 }
 
+func TestSkipAllMarksEverythingAsSkip(t *testing.T) {
+	m := newModel(mixedItems())
+	// Before skip all: 2 items pending (new.txt, gone.txt)
+	if len(m.filtered) != 2 {
+		t.Fatalf("filtered = %d, want 2", len(m.filtered))
+	}
+	// Press 'S' (Shift+S)
+	m = sendKey(m, "S").(Model)
+	for _, it := range m.items {
+		if it.Action != domain.ActionSkip {
+			t.Fatalf("item %s action = %v, want ActionSkip", it.RelativePath, it.Action)
+		}
+		if _, ok := m.retainedSkips[it]; !ok {
+			t.Fatalf("item %s should be in retainedSkips", it.RelativePath)
+		}
+	}
+	// With all marked as skip, they should remain visible in filtered list
+	if len(m.filtered) != 3 {
+		t.Fatalf("filtered after skipAll = %d, want 3", len(m.filtered))
+	}
+}
+
+func TestDisplayPathNoTrailingSlash(t *testing.T) {
+	tests := []struct {
+		name     string
+		scope    string
+		relPath  string
+		expected string
+	}{
+		{
+			name:     "single file with empty relPath",
+			scope:    "api.php",
+			relPath:  "",
+			expected: "api.php",
+		},
+		{
+			name:     "single file with trailing slash in scope and empty relPath",
+			scope:    "api.php/",
+			relPath:  "",
+			expected: "api.php",
+		},
+		{
+			name:     "folder scope with file relPath",
+			scope:    "public",
+			relPath:  "api.php",
+			expected: "public/api.php",
+		},
+		{
+			name:     "folder scope with trailing slash and relPath with leading/trailing slash",
+			scope:    "public/",
+			relPath:  "/api.php/",
+			expected: "public/api.php",
+		},
+		{
+			name:     "empty scope with file relPath",
+			scope:    "",
+			relPath:  "api.php",
+			expected: "api.php",
+		},
+		{
+			name:     "empty scope with trailing slash relPath",
+			scope:    "",
+			relPath:  "api.php/",
+			expected: "api.php",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			it := &domain.SyncFileItem{
+				Scope:        tt.scope,
+				RelativePath: tt.relPath,
+			}
+			got := displayPath(it)
+			if got != tt.expected {
+				t.Fatalf("displayPath() = %q, want %q", got, tt.expected)
+			}
+		})
+	}
+}
+
 func TestScrollClampsOffset(t *testing.T) {
 	var items []*domain.SyncFileItem
 	for i := 0; i < 60; i++ {
