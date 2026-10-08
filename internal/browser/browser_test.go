@@ -985,5 +985,30 @@ func TestFinishUnmappedFolder(t *testing.T) {
 	}
 }
 
+// TestWindowShrinkKeepsCursorVisible covers the resize path: a window that
+// gets shorter must scroll the list so the cursor row stays on screen.
+func TestWindowShrinkKeepsCursorVisible(t *testing.T) {
+	root := t.TempDir()
+	for i := 0; i < 20; i++ {
+		_ = os.MkdirAll(filepath.Join(root, fmt.Sprintf("dir%02d", i)), 0o755)
+	}
+	m := New(root, "")
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
+	for i := 0; i < 15; i++ {
+		updated = sendKey(updated, "down")
+	}
+	mm := updated.(Model)
 
-
+	// The shrink halves the visible rows: the window has to scroll so the
+	// cursor row stays on screen instead of falling off the bottom.
+	updated, _ = mm.Update(tea.WindowSizeMsg{Width: 100, Height: 8})
+	shrunk := updated.(Model)
+	vis := max(3, shrunk.height-5)
+	if shrunk.cursor < shrunk.offset || shrunk.cursor >= shrunk.offset+vis {
+		t.Fatalf("cursor %d outside window [%d,%d) after shrink", shrunk.cursor, shrunk.offset, shrunk.offset+vis)
+	}
+	name := shrunk.entries[shrunk.cursor-1].name
+	if !strings.Contains(shrunk.View(), name) {
+		t.Fatalf("cursor row %q missing from the shrunk view:\n%s", name, shrunk.View())
+	}
+}

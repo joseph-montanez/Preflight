@@ -21,8 +21,43 @@ import (
 // reading ANSI byte sequences and translating CSI-u into Alt+key events reliably.
 type keyboardInput struct {
 	inner   *os.File
-	pending []byte // translated bytes not yet returned
-	hold    []byte // incomplete CSI-u prefix waiting for its terminator
+	pending []byte      // translated bytes not yet returned
+	hold    []byte      // incomplete CSI-u prefix waiting for its terminator
+	plat    consoleHook // platform-specific blocking read; nil in tests
+}
+
+// consoleHook abstracts the blocking byte read behind keyboardInput so the
+// windows build can make it cancelable (see keyboard_windows.go). A plain
+// os.File read is the fallback used by tests and by non-console stdin.
+type consoleHook interface {
+	read(buf []byte) (int, error)
+	close()
+}
+
+type plainConsole struct{ in *os.File }
+
+func (c *plainConsole) read(buf []byte) (int, error) { return c.in.Read(buf) }
+func (c *plainConsole) close()                       {}
+
+// newKeyboardInput builds the reader used for every tea.Program in this app.
+func newKeyboardInput(inner *os.File) *keyboardInput {
+	return &keyboardInput{inner: inner, plat: newConsoleHook(inner)}
+}
+
+// shutdown cancels and tears down the platform read so the input goroutine
+// cannot outlive the program: a read loop left blocked would swallow the
+// first keypress of the next program (charmbracelet/bubbletea#1167).
+func (k *keyboardInput) shutdown() {
+	if k.plat != nil {
+		k.plat.close()
+	}
+}
+
+func (k *keyboardInput) rawRead(buf []byte) (int, error) {
+	if k.plat != nil {
+		return k.plat.read(buf)
+	}
+	return k.inner.Read(buf)
 }
 
 func (k *keyboardInput) Read(p []byte) (int, error) {
@@ -32,7 +67,7 @@ func (k *keyboardInput) Read(p []byte) (int, error) {
 		return n, nil
 	}
 	buf := make([]byte, 256)
-	n, err := k.inner.Read(buf)
+	n, err := k.rawRead(buf)
 	if n == 0 {
 		return 0, err
 	}

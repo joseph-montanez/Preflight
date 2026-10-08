@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"preflight/internal/config"
+	"preflight/internal/listwin"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -305,22 +306,15 @@ func (m Model) View() string {
 func (m Model) viewAction() string {
 	var b strings.Builder
 	b.WriteString(headerStyle.Render(" What do you want to do?") + "\n")
-	maxRows := max(3, m.height-3)
-	for i, a := range Actions {
-		if i >= maxRows {
-			b.WriteString(faintStyle.Render(" …") + "\n")
-			break
-		}
-		marker := "  "
-		if i == m.actionCursor {
-			marker = "▸ "
-		}
-		line := fmt.Sprintf("%s%-10s %s", marker, actionLabel(a), actionHint(a))
-		if i == m.actionCursor {
-			b.WriteString(selectedStyle.Render(truncate(line, m.width)) + "\n")
-		} else {
-			b.WriteString(truncate(line, m.width) + "\n")
-		}
+	start, end, moreAbove, moreBelow := listwin.Window(len(Actions), m.actionCursor, m.listRows())
+	if moreAbove {
+		b.WriteString(m.hiddenRows("↑", start) + "\n")
+	}
+	for i := start; i < end; i++ {
+		b.WriteString(m.renderActionRow(i) + "\n")
+	}
+	if moreBelow {
+		b.WriteString(m.hiddenRows("↓", len(Actions)-end) + "\n")
 	}
 	hints := "[↑/↓] move  [Enter] select  [Q] quit"
 	if m.listLen() <= 9 {
@@ -333,6 +327,30 @@ func (m Model) viewAction() string {
 	return b.String()
 }
 
+// listRows is how many list rows fit under the header before the hints line.
+func (m Model) listRows() int {
+	return max(3, m.height-3)
+}
+
+// hiddenRows is the marker line standing in for rows scrolled out of the
+// visible window.
+func (m Model) hiddenRows(arrow string, n int) string {
+	return faintStyle.Render(fmt.Sprintf("  %s %d more", arrow, n))
+}
+
+func (m Model) renderActionRow(i int) string {
+	a := Actions[i]
+	marker := "  "
+	if i == m.actionCursor {
+		marker = "▸ "
+	}
+	line := fmt.Sprintf("%s%-10s %s", marker, actionLabel(a), actionHint(a))
+	if i == m.actionCursor {
+		return selectedStyle.Render(truncate(line, m.width))
+	}
+	return truncate(line, m.width)
+}
+
 func (m Model) viewTarget() string {
 	var b strings.Builder
 	switch m.action {
@@ -343,40 +361,36 @@ func (m Model) viewTarget() string {
 	default:
 		b.WriteString(headerStyle.Render(fmt.Sprintf(" Select project to %s (%d)", strings.ToLower(actionLabel(m.action)), len(m.projects))) + "\n")
 	}
-	maxRows := max(3, m.height-3)
+	maxRows := m.listRows()
+	total := m.listLen()
+	start, end, moreAbove, moreBelow := listwin.Window(total, m.cursor, maxRows)
+	if moreAbove {
+		b.WriteString(m.hiddenRows("↑", start) + "\n")
+	}
 	if m.action == ActionSSH {
-		for i, account := range m.accounts {
-			if i >= maxRows {
-				b.WriteString(faintStyle.Render(" …") + "\n")
-				break
-			}
-			b.WriteString(m.renderAccount(i, account) + "\n")
+		for i := start; i < end; i++ {
+			b.WriteString(m.renderAccount(i, m.accounts[i]) + "\n")
 		}
-		if len(m.accounts) == 0 {
+		if total == 0 {
 			b.WriteString(faintStyle.Render("  no accounts — pick Manage to add one") + "\n")
 		}
 	} else if m.action == ActionRun {
-		for i, task := range m.tasks {
-			if i >= maxRows {
-				b.WriteString(faintStyle.Render(" …") + "\n")
-				break
-			}
-			b.WriteString(m.renderTask(i, task) + "\n")
+		for i := start; i < end; i++ {
+			b.WriteString(m.renderTask(i, m.tasks[i]) + "\n")
 		}
-		if len(m.tasks) == 0 {
+		if total == 0 {
 			b.WriteString(faintStyle.Render("  no tasks — pick Manage to add one") + "\n")
 		}
 	} else {
-		for i, project := range m.projects {
-			if i >= maxRows {
-				b.WriteString(faintStyle.Render(" …") + "\n")
-				break
-			}
-			b.WriteString(m.renderProject(i, project) + "\n")
+		for i := start; i < end; i++ {
+			b.WriteString(m.renderProject(i, m.projects[i]) + "\n")
 		}
-		if len(m.projects) == 0 {
+		if total == 0 {
 			b.WriteString(faintStyle.Render("  no projects — pick Manage to add one") + "\n")
 		}
+	}
+	if moreBelow {
+		b.WriteString(m.hiddenRows("↓", total-end) + "\n")
 	}
 	hints := "[↑/↓] move  [Enter] select  [Esc] back  [Q] quit"
 	if m.listLen() <= 9 && m.listLen() > 0 {

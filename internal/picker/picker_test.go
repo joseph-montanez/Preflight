@@ -1,10 +1,12 @@
 package picker
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
 	"preflight/internal/config"
+	"preflight/internal/listwin"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -375,5 +377,102 @@ func TestViewRendersHeaderNewlineOutsideStyle(t *testing.T) {
 	header := " What do you want to do?"
 	if got := m.View(); !strings.HasPrefix(got, headerStyle.Render(header)+"\n") {
 		t.Fatalf("View() should end the styled header before its newline; got %q", got)
+	}
+}
+
+// manyProjects builds a project list long enough to need a scrolling window.
+func manyProjects(n int) []config.Project {
+	out := make([]config.Project, 0, n)
+	for i := 0; i < n; i++ {
+		id := fmt.Sprintf("proj%02d", i)
+		out = append(out, config.Project{ID: id, Name: id, AccountID: "acc1", LocalRoot: "/" + id, RemoteRoot: "/r/" + id})
+	}
+	return out
+}
+
+// sized applies a window size and returns the model, the way the program does.
+func sized(t *testing.T, m tea.Model, w, h int) tea.Model {
+	t.Helper()
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: w, Height: h})
+	return updated
+}
+
+// TestTargetListScrollsWithCursor covers the pre-existing bug where the list
+// rendered from row 0: with more projects than rows the cursor walked off the
+// bottom of the screen and disappeared.
+func TestTargetListScrollsWithCursor(t *testing.T) {
+	var m tea.Model = New(manyProjects(20), accounts(), tasks())
+	m = pickAction(m, 0) // Sync -> project list
+	m = sized(t, m, 100, 10)
+	if rows := m.(Model).listRows(); rows != 7 {
+		t.Fatalf("listRows = %d, want 7", rows)
+	}
+
+	// Walk to the last project; every stop must keep the cursor row visible.
+	for i := 0; i < 19; i++ {
+		mm := m.(Model)
+		cursorID := mm.projects[mm.cursor].ID
+		if view := mm.View(); !strings.Contains(view, "▸ "+cursorID) {
+			t.Fatalf("cursor row %q not highlighted at cursor %d:\n%s", cursorID, mm.cursor, view)
+		}
+		m = sendKey(m, "down")
+	}
+	mm := m.(Model)
+	if mm.cursor != 19 {
+		t.Fatalf("cursor = %d, want 19", mm.cursor)
+	}
+	view := mm.View()
+	if !strings.Contains(view, "▸ proj19") {
+		t.Fatalf("last project must be visible:\n%s", view)
+	}
+	if !strings.Contains(view, "↑ 15 more") {
+		t.Fatalf("rows hidden above should be counted:\n%s", view)
+	}
+
+	// Back to the top: nothing hidden above, the rest counted below.
+	m = sendKey(m, "home")
+	view = m.(Model).View()
+	if !strings.Contains(view, "▸ proj00") {
+		t.Fatalf("first project must be visible after home:\n%s", view)
+	}
+	if !strings.Contains(view, "↓ 15 more") {
+		t.Fatalf("rows hidden below should be counted:\n%s", view)
+	}
+}
+
+// TestResizeKeepsListCursorVisible covers the resize path for the launcher:
+// shrinking the terminal must re-window the list around the cursor.
+func TestResizeKeepsListCursorVisible(t *testing.T) {
+	var m tea.Model = New(manyProjects(20), accounts(), tasks())
+	m = pickAction(m, 0)
+	m = sized(t, m, 100, 40)
+	for i := 0; i < 15; i++ {
+		m = sendKey(m, "down")
+	}
+	m = sized(t, m, 100, 8)
+	mm := m.(Model)
+	start, end, _, _ := listwin.Window(len(mm.projects), mm.cursor, mm.listRows())
+	if mm.cursor < start || mm.cursor >= end {
+		t.Fatalf("cursor %d outside window [%d,%d)", mm.cursor, start, end)
+	}
+	if !strings.Contains(mm.View(), "▸ proj15") {
+		t.Fatalf("cursor row missing after shrink:\n%s", mm.View())
+	}
+}
+
+// TestActionMenuScrollsWithCursor covers the same windowing for the action
+// menu, which has its own cursor.
+func TestActionMenuScrollsWithCursor(t *testing.T) {
+	var m tea.Model = New(projects(), accounts(), tasks())
+	m = sized(t, m, 100, 5) // listRows() = 3: one row plus markers
+	for i := 0; i < len(Actions)-1; i++ {
+		m = sendKey(m, "down")
+	}
+	view := m.(Model).View()
+	if !strings.Contains(view, "▸ Run") {
+		t.Fatalf("cursor row must stay visible in a short window:\n%s", view)
+	}
+	if !strings.Contains(view, "↑ 5 more") {
+		t.Fatalf("menu rows above should be counted:\n%s", view)
 	}
 }

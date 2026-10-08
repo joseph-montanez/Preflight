@@ -1,6 +1,7 @@
 package manage
 
 import (
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
@@ -676,5 +677,63 @@ func TestDeleteAccountWarnsAboutTasks(t *testing.T) {
 	m = sendKey(m, "d") // delete kiosks (cursor 0)
 	if got := m.(Model).confirm; !strings.Contains(got, "task:deploy") {
 		t.Fatalf("confirm should name the task ref: %q", got)
+	}
+}
+
+// manyAccounts builds an account list longer than the terminal.
+func manyAccounts(n int) *config.Config {
+	cfg := &config.Config{}
+	for i := 0; i < n; i++ {
+		cfg.Accounts = append(cfg.Accounts, config.Account{
+			ID: fmt.Sprintf("acc%02d", i), Name: "Account", Protocol: "sftp",
+			Host: "host.example.com", Port: 22, Auth: config.Auth{Username: "deploy"},
+		})
+	}
+	return cfg
+}
+
+// TestListScrollsWithCursor covers the pre-existing bug where the config list
+// rendered from row 0: with more entries than rows the cursor walked off the
+// bottom of the screen and the selected entry was invisible.
+func TestListScrollsWithCursor(t *testing.T) {
+	var m tea.Model = New(manyAccounts(20), filepath.Join(t.TempDir(), "config.yaml"))
+	m = send(m, tea.WindowSizeMsg{Width: 100, Height: 10})
+
+	for i := 0; i < 19; i++ {
+		mm := m.(Model)
+		id := mm.cfg.Accounts[mm.cursor].ID
+		if view := mm.View(); !strings.Contains(view, "▸ "+id) {
+			t.Fatalf("cursor row %q not highlighted at cursor %d:\n%s", id, mm.cursor, view)
+		}
+		m = sendKey(m, "down")
+	}
+
+	mm := m.(Model)
+	if mm.cursor != 19 {
+		t.Fatalf("cursor = %d, want 19", mm.cursor)
+	}
+	view := mm.View()
+	if !strings.Contains(view, "▸ acc19") {
+		t.Fatalf("last account must be visible:\n%s", view)
+	}
+	if !strings.Contains(view, "↑ 15 more") {
+		t.Fatalf("rows hidden above should be counted:\n%s", view)
+	}
+
+	// A shrink must re-window the list around the cursor.
+	m = send(mm, tea.WindowSizeMsg{Width: 100, Height: 6})
+	mm = m.(Model)
+	if view := mm.View(); !strings.Contains(view, "▸ acc19") {
+		t.Fatalf("cursor row missing after shrink:\n%s", view)
+	}
+
+	// ... and the top of the list counts the rows below it.
+	m = sendKey(m, "home")
+	view = m.(Model).View()
+	if !strings.Contains(view, "▸ acc00") {
+		t.Fatalf("first account must be visible after home:\n%s", view)
+	}
+	if !strings.Contains(view, "↓ 19 more") {
+		t.Fatalf("rows hidden below should be counted:\n%s", view)
 	}
 }

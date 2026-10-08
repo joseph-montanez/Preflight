@@ -495,6 +495,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
+		// A shorter window can leave the cursor below the visible rows.
+		m.clampOffset()
 	case tea.KeyMsg:
 		if m.searchOn {
 			return m.handleSearchKey(msg)

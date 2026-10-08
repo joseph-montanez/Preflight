@@ -360,7 +360,7 @@ files, but not for files skipped because they are logs.
 | `d` | Download |
 | `x` | Delete local/remote |
 | `s` | Skip (the row stays visible so the choice can be reversed without rescanning) |
-| `S` | Mark every file as skip (same reversible skip, applied to the whole list) |
+| `S` | Mark every changed file as skip (same reversible skip; identical files stay hidden, the diffs stay listed) |
 | `i` | Ignore the file: adds it to the project's `exclusions` in config.yaml and removes it from the queue (no rescan needed) |
 | `PageUp` / `PageDown` | Page through the list, or scroll the diff when focused |
 | `Enter` | Execute selected plan |

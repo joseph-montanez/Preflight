@@ -2,6 +2,7 @@ package remotebrowser
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
@@ -528,5 +529,35 @@ func TestFilterAtVirtualRoot(t *testing.T) {
 	m = sendKey(m, "enter").(Model)
 	if m.current != "/var/www/api-backend" {
 		t.Fatalf("current = %q, want /var/www/api-backend", m.current)
+	}
+}
+
+// TestWindowShrinkKeepsCursorVisible covers the resize path: a shorter window
+// must scroll the listing so the cursor row stays on screen.
+func TestWindowShrinkKeepsCursorVisible(t *testing.T) {
+	fake := newFakeRemote()
+	entries := make([]fakeInfo, 0, 20)
+	for i := 0; i < 20; i++ {
+		entries = append(entries, fakeInfo{name: fmt.Sprintf("f%02d.txt", i)})
+	}
+	fake.tree["/var/www/api-backend"] = entries
+
+	m := New(fake, testMappings(), filepath.FromSlash("/home/dev/code/api-backend"), "")
+	m.width, m.height = 100, 24
+	m.current = "/var/www/api-backend"
+	m.load()
+	for i := 0; i < 15; i++ {
+		m = sendKey(m, "down").(Model)
+	}
+
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 8})
+	shrunk := updated.(Model)
+	vis := max(3, shrunk.height-5)
+	if shrunk.cursor < shrunk.offset || shrunk.cursor >= shrunk.offset+vis {
+		t.Fatalf("cursor %d outside window [%d,%d) after shrink", shrunk.cursor, shrunk.offset, shrunk.offset+vis)
+	}
+	name := shrunk.entries[shrunk.cursor-2].name
+	if !strings.Contains(shrunk.View(), name) {
+		t.Fatalf("cursor row missing from the shrunk view:\n%s", shrunk.View())
 	}
 }

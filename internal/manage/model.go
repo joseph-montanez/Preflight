@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"preflight/internal/config"
+	"preflight/internal/listwin"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -452,34 +453,40 @@ func (m *Model) renderHeader() string {
 	return truncate(header, m.width)
 }
 
+// renderList draws the windowed list of the active tab. The window follows the
+// cursor, so a list longer than the terminal stays usable: the cursor row is
+// always on screen and the rows scrolled out of view are counted above/below.
 func (m *Model) renderList() string {
-	rows := []string{}
-	switch m.tab {
-	case 0:
-		for i := range m.cfg.Accounts {
-			rows = append(rows, m.renderAccountRow(i))
-		}
-		if len(rows) == 0 {
-			rows = append(rows, faintStyle.Render("  no accounts — press n to add one"))
-		}
-	case 2:
-		for i := range m.cfg.Tasks {
-			rows = append(rows, m.renderTaskRow(i))
-		}
-		if len(rows) == 0 {
-			rows = append(rows, faintStyle.Render("  no tasks — press n to add one"))
-		}
-	default:
-		for i := range m.cfg.Projects {
-			rows = append(rows, m.renderProjectRow(i))
-		}
-		if len(rows) == 0 {
-			rows = append(rows, faintStyle.Render("  no projects — press n to add one"))
+	total := m.listLen()
+	if total == 0 {
+		switch m.tab {
+		case 0:
+			return faintStyle.Render("  no accounts — press n to add one")
+		case 2:
+			return faintStyle.Render("  no tasks — press n to add one")
+		default:
+			return faintStyle.Render("  no projects — press n to add one")
 		}
 	}
+
 	maxRows := max(3, m.height-3)
-	if len(rows) > maxRows {
-		rows = append(rows[:maxRows-1], faintStyle.Render(" …"))
+	start, end, moreAbove, moreBelow := listwin.Window(total, m.cursor, maxRows)
+	rows := make([]string, 0, end-start+2)
+	if moreAbove {
+		rows = append(rows, faintStyle.Render(fmt.Sprintf("  ↑ %d more", start)))
+	}
+	for i := start; i < end; i++ {
+		switch m.tab {
+		case 0:
+			rows = append(rows, m.renderAccountRow(i))
+		case 2:
+			rows = append(rows, m.renderTaskRow(i))
+		default:
+			rows = append(rows, m.renderProjectRow(i))
+		}
+	}
+	if moreBelow {
+		rows = append(rows, faintStyle.Render(fmt.Sprintf("  ↓ %d more", total-end)))
 	}
 	return strings.Join(rows, "\n")
 }

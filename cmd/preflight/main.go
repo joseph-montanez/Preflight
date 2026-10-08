@@ -41,7 +41,16 @@ func runProgram(model tea.Model, opts ...tea.ProgramOption) (tea.Model, error) {
 	}
 	defer restore()
 
-	p := tea.NewProgram(model, append([]tea.ProgramOption{tea.WithInput(&keyboardInput{inner: os.Stdin})}, opts...)...)
+	ki := newKeyboardInput(os.Stdin)
+	// Cancel and tear down the input reader when the program ends: bubbletea's
+	// fallback cancelreader cannot interrupt a console read on windows, and a
+	// read loop left blocked would swallow the first keypress of the next
+	// program (charmbracelet/bubbletea#1167).
+	defer ki.shutdown()
+
+	p := tea.NewProgram(model, append([]tea.ProgramOption{tea.WithInput(ki)}, opts...)...)
+	stopResize := watchResize(p)
+	defer stopResize()
 	return p.Run()
 }
 

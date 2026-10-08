@@ -1,6 +1,7 @@
 package localbrowser
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -304,5 +305,35 @@ func TestSearchQTypesInsteadOfQuitting(t *testing.T) {
 	}
 	if m.rowCount() != 2 {
 		t.Fatalf("rowCount = %d, want 2", m.rowCount())
+	}
+}
+
+// TestWindowShrinkKeepsCursorVisible covers the resize path: a shorter window
+// must scroll the listing so the cursor row stays on screen.
+func TestWindowShrinkKeepsCursorVisible(t *testing.T) {
+	m, root := newTestModel(t)
+	for i := 0; i < 20; i++ {
+		name := filepath.Join(root, fmt.Sprintf("f%02d.txt", i))
+		if err := os.WriteFile(name, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m.current = root
+	m.load()
+	m.width, m.height = 100, 24
+	for i := 0; i < 15; i++ {
+		updated, _ := m.Update(key("down"))
+		m = updated.(Model)
+	}
+
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 8})
+	shrunk := updated.(Model)
+	vis := max(3, shrunk.height-5)
+	if shrunk.cursor < shrunk.offset || shrunk.cursor >= shrunk.offset+vis {
+		t.Fatalf("cursor %d outside window [%d,%d) after shrink", shrunk.cursor, shrunk.offset, shrunk.offset+vis)
+	}
+	name := shrunk.entries[shrunk.cursor-2].name
+	if !strings.Contains(shrunk.View(), name) {
+		t.Fatalf("cursor row %q missing from the shrunk view:\n%s", name, shrunk.View())
 	}
 }

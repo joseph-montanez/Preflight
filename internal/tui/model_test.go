@@ -101,9 +101,10 @@ func TestSkipStaysVisibleAndCanBeReversed(t *testing.T) {
 	}
 }
 
-func TestSkipAllMarksEverythingAsSkip(t *testing.T) {
+func TestSkipAllMarksOnlyChangedFiles(t *testing.T) {
 	m := newModel(mixedItems())
-	// Before skip all: 2 items pending (new.txt, gone.txt)
+	// Before skip all: 2 items pending (new.txt, gone.txt), same.txt is skip
+	// because it is identical.
 	if len(m.filtered) != 2 {
 		t.Fatalf("filtered = %d, want 2", len(m.filtered))
 	}
@@ -113,14 +114,44 @@ func TestSkipAllMarksEverythingAsSkip(t *testing.T) {
 		if it.Action != domain.ActionSkip {
 			t.Fatalf("item %s action = %v, want ActionSkip", it.RelativePath, it.Action)
 		}
-		if _, ok := m.retainedSkips[it]; !ok {
-			t.Fatalf("item %s should be in retainedSkips", it.RelativePath)
+	}
+	for _, name := range []string{"new.txt", "gone.txt"} {
+		if _, ok := m.retainedSkips[itemNamed(m, name)]; !ok {
+			t.Fatalf("changed item %s should be in retainedSkips", name)
 		}
 	}
-	// With all marked as skip, they should remain visible in filtered list
-	if len(m.filtered) != 3 {
-		t.Fatalf("filtered after skipAll = %d, want 3", len(m.filtered))
+	if _, ok := m.retainedSkips[itemNamed(m, "same.txt")]; ok {
+		t.Fatalf("identical item same.txt must not be retained")
 	}
+	// The skipped diffs stay visible; the identical file stays hidden.
+	if len(m.filtered) != 2 {
+		t.Fatalf("filtered after skipAll = %d, want 2", len(m.filtered))
+	}
+	for _, idx := range m.filtered {
+		if m.items[idx].RelativePath == "same.txt" {
+			t.Fatalf("unchanged file became visible after skipAll")
+		}
+	}
+}
+
+func TestSkipAllWithNoDiffs(t *testing.T) {
+	m := newModel([]*domain.SyncFileItem{item("same.txt", domain.ActionSkip)})
+	m = sendKey(m, "S").(Model)
+	if len(m.retainedSkips) != 0 {
+		t.Fatalf("retainedSkips = %d, want 0", len(m.retainedSkips))
+	}
+	if len(m.filtered) != 0 {
+		t.Fatalf("filtered = %d, want 0", len(m.filtered))
+	}
+}
+
+func itemNamed(m Model, path string) *domain.SyncFileItem {
+	for _, it := range m.items {
+		if it.RelativePath == path {
+			return it
+		}
+	}
+	return nil
 }
 
 func TestDisplayPathNoTrailingSlash(t *testing.T) {
@@ -850,5 +881,33 @@ func TestWordWrapToggle(t *testing.T) {
 	}
 	if !strings.Contains(mm.status, "word wrap enabled") {
 		t.Fatalf("status = %q, want enabled message", mm.status)
+	}
+}
+
+// TestWindowShrinkKeepsCursorVisible covers the resize path: a shorter window
+// must scroll the file list so the cursor row stays on screen.
+func TestWindowShrinkKeepsCursorVisible(t *testing.T) {
+	items := make([]*domain.SyncFileItem, 0, 30)
+	for i := 0; i < 30; i++ {
+		items = append(items, item(fmt.Sprintf("file%02d.txt", i), domain.ActionUpload))
+	}
+	m := newModel(items)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	for i := 0; i < 25; i++ {
+		updated = sendKey(updated, "down")
+	}
+	grown := updated.(Model)
+	if grown.cursor != 25 {
+		t.Fatalf("cursor = %d, want 25", grown.cursor)
+	}
+
+	updated, _ = grown.Update(tea.WindowSizeMsg{Width: 100, Height: 12})
+	shrunk := updated.(Model)
+	vis := shrunk.listHeight()
+	if shrunk.cursor < shrunk.offset || shrunk.cursor >= shrunk.offset+vis {
+		t.Fatalf("cursor %d outside window [%d,%d) after shrink", shrunk.cursor, shrunk.offset, shrunk.offset+vis)
+	}
+	if !strings.Contains(shrunk.View(), "file25.txt") {
+		t.Fatalf("cursor row missing from the shrunk view:\n%s", shrunk.View())
 	}
 }

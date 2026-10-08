@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 
+	"preflight/internal/listwin"
+
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -408,8 +410,20 @@ func (f *Form) View(width, height int) string {
 	boxW := min(80, max(44, width-4))
 	contentW := boxW - 4 // border + padding
 	labelW := 18
+	maxRows := max(8, height-2)
+
+	tail := []string{helpRow(f, contentW-2), statusRow(f, contentW-2)}
+	// The title, the help row and the status row are always visible, and the
+	// completion popup hangs off the cursor field; whatever is left is the
+	// budget for the field window.
+	reserved := 1 + len(tail) + popupLineCount(f)
+	start, end, moreAbove, moreBelow := listwin.Window(len(f.Fields), f.Cursor, max(1, maxRows-reserved))
+
 	rows := []string{titleStyle.Render(" " + f.Title)}
-	for i := range f.Fields {
+	if moreAbove {
+		rows = append(rows, faintStyle.Render(fmt.Sprintf(" ↑ %d more", start)))
+	}
+	for i := start; i < end; i++ {
 		rows = append(rows, f.renderField(i, contentW-1, labelW))
 		if i == f.Cursor {
 			if f.popupErr != "" && f.popup == nil {
@@ -420,14 +434,33 @@ func (f *Form) View(width, height int) string {
 			}
 		}
 	}
-	rows = append(rows, helpRow(f, contentW-2))
-	rows = append(rows, statusRow(f, contentW-2))
-	maxRows := max(8, height-2)
+	if moreBelow {
+		rows = append(rows, faintStyle.Render(fmt.Sprintf(" ↓ %d more", len(f.Fields)-end)))
+	}
+	rows = append(rows, tail...)
+	// Safety net: an oversized popup can still overshoot the budget.
 	if len(rows) > maxRows {
 		rows = append(rows[:maxRows-1], faintStyle.Render(" …"))
 	}
 	box := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Width(boxW).Padding(0, 1)
 	return box.Render(strings.Join(rows, "\n"))
+}
+
+// popupLineCount is how many rows the completion popup (or its error line)
+// adds below the cursor field.
+func popupLineCount(f *Form) int {
+	if f.popup == nil {
+		if f.popupErr != "" {
+			return 1
+		}
+		return 0
+	}
+	const maxShow = 6
+	lines := min(len(f.popup), maxShow)
+	if len(f.popup) > maxShow {
+		lines++ // the "… n more" line
+	}
+	return lines + 2 // border
 }
 
 func helpRow(f *Form, w int) string {

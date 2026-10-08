@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -20,6 +21,7 @@ import (
 // memClient is an in-memory RemoteClient that can simulate servers which
 // refuse to rename over an existing file.
 type memClient struct {
+	mu         sync.Mutex
 	files      map[string][]byte
 	dirs       []string
 	renames    int
@@ -34,6 +36,8 @@ func newMemClient() *memClient {
 func (c *memClient) Connect() error { return nil }
 func (c *memClient) Close() error   { return nil }
 func (c *memClient) Stat(path string) (*domain.FileMeta, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	data, ok := c.files[path]
 	if !ok {
 		// Any path that is a parent of a stored file is a directory.
@@ -48,6 +52,8 @@ func (c *memClient) Stat(path string) (*domain.FileMeta, error) {
 }
 func (c *memClient) ReadDir(path string) ([]fs.FileInfo, error) { return nil, nil }
 func (c *memClient) OpenReader(path string) (io.ReadCloser, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	data, ok := c.files[path]
 	if !ok {
 		return nil, os.ErrNotExist
@@ -58,15 +64,21 @@ func (c *memClient) OpenWriter(path string) (io.WriteCloser, error) {
 	return &memWriter{client: c, path: path}, nil
 }
 func (c *memClient) Remove(path string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	delete(c.files, path)
 	return nil
 }
 func (c *memClient) MkdirAll(path string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.dirs = append(c.dirs, path)
 	return nil
 }
 func (c *memClient) FastHash(string) (string, error) { return "", domain.ErrFastHashUnsupported }
 func (c *memClient) Rename(oldPath, newPath string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.renames++
 	if c.failRename {
 		return errors.New("rename refused by server")
@@ -76,6 +88,8 @@ func (c *memClient) Rename(oldPath, newPath string) error {
 	return nil
 }
 func (c *memClient) Chtimes(string, time.Time, time.Time) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.times++
 	return nil
 }
@@ -119,6 +133,9 @@ func (r *changingReader) Close() error { return nil }
 
 func (w *memWriter) Write(p []byte) (int, error) { return w.buf.Write(p) }
 func (w *memWriter) Close() error {
+	// Uploads run on worker goroutines, so the shared map needs a lock.
+	w.client.mu.Lock()
+	defer w.client.mu.Unlock()
 	w.client.files[w.path] = w.buf.Bytes()
 	return nil
 }

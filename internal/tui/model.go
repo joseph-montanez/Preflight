@@ -560,7 +560,7 @@ func (m Model) View() string {
 	case TransferUpload:
 		header = headerStyle.Render(fmt.Sprintf("Project: %s | Uploading to: %s | Connection: %s", m.projectName, m.remoteRoot, m.connection))
 	}
-	toolbar := "Actions: [U]pload [D]ownload [X] Delete [S]kip (Shift+S all) [I]gnore | [P]ull | [W] Wrap | [F]ilter: pending/all | [Tab] Pane | [Space] Cycle | [Enter] Deploy"
+	toolbar := "Actions: [U]pload [D]ownload [X] Delete [S]kip (Shift+S changed) [I]gnore | [P]ull | [W] Wrap | [F]ilter: pending/all | [Tab] Pane | [Space] Cycle | [Enter] Deploy"
 	switch m.transferMode {
 	case TransferDownload:
 		toolbar = "Downloads: [Space] skip file | [Shift+S] skip all | [Enter] Download | [Q] quit"
@@ -646,6 +646,8 @@ func (m *Model) resize() {
 		rightWidth := max(28, m.width-leftWidth-3)
 		m.viewport.Width = max(20, rightWidth-2)
 	}
+	// A shorter window can leave the cursor below the visible rows.
+	m.clampOffset()
 	m.refreshDiff()
 }
 
@@ -1012,13 +1014,29 @@ func (m *Model) skipAll() {
 	if m.retainedSkips == nil {
 		m.retainedSkips = make(map[*domain.SyncFileItem]struct{})
 	}
+	// Only files with a pending action (an actual diff) are marked. Files that
+	// were already Skip because they are identical are left alone: retaining
+	// them would push every no-diff file into the list, hiding the diffs the
+	// user is trying to clear.
+	marked := 0
 	for _, item := range m.items {
+		if item.Action == domain.ActionSkip {
+			continue
+		}
 		item.Action = domain.ActionSkip
 		m.retainedSkips[item] = struct{}{}
+		marked++
 	}
 	m.rebuildFiltered()
 	m.refreshDiff()
-	m.status = "marked all as skip"
+	switch {
+	case marked == 0:
+		m.status = "no diffs to skip"
+	case marked == 1:
+		m.status = "marked the only changed file as skip"
+	default:
+		m.status = fmt.Sprintf("marked %d changed files as skip", marked)
+	}
 }
 
 
