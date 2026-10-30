@@ -355,6 +355,7 @@ func main() {
 			LocalRoot:  project.LocalRoot,
 			RemoteRoot: project.RemoteRoot,
 			Client:     client,
+			Clients:    clients,
 			Workers:    *workers,
 			OnEvent:    sink.Record,
 			OnProgress: sink.RecordProgress,
@@ -410,12 +411,30 @@ func main() {
 // a remote file hands control to the configured editor (see
 // openRemoteEdit) and re-opens the browser with the marks restored.
 func runRemoteBrowse(project config.Project, account config.Account, prompt remote.SecretPrompt, workers int, editorCmd string) remoteFlow {
-	client, err := remote.NewClient(account, prompt)
-	fatalIf(err)
-	if err := client.Connect(); err != nil {
-		fatalIf(err)
+	// One connection per transfer worker so parallel downloads never share
+	// a transport between goroutines; the browser uses the first one.
+	nconns := workers
+	if nconns < 1 {
+		nconns = 1
 	}
-	defer client.Close()
+	pool := make([]domain.RemoteClient, 0, nconns)
+	for i := 0; i < nconns; i++ {
+		c, err := remote.NewClient(account, prompt)
+		fatalIf(err)
+		if err := c.Connect(); err != nil {
+			for _, open := range pool {
+				_ = open.Close()
+			}
+			fatalIf(err)
+		}
+		pool = append(pool, c)
+	}
+	client := pool[0]
+	defer func() {
+		for _, c := range pool {
+			_ = c.Close()
+		}
+	}()
 	fmt.Fprintf(os.Stderr, "Connecting to %s...\n", account.Name)
 
 	var marks []string // selection preserved across edit sessions
@@ -481,6 +500,7 @@ func runRemoteBrowse(project config.Project, account config.Account, prompt remo
 		sink := syncer.NewTransferSink()
 		executor := &syncer.Executor{
 			Client:     client,
+			Clients:    pool,
 			Workers:    workers,
 			OnEvent:    sink.Record,
 			OnProgress: sink.RecordProgress,
@@ -569,12 +589,30 @@ func buildDownloadItems(client domain.RemoteClient, roots []remotebrowser.Downlo
 // cursor (local file — no transfer) and re-opens the browser with the
 // marks restored.
 func runLocalUpload(project config.Project, account config.Account, prompt remote.SecretPrompt, workers int, editorCmd string) remoteFlow {
-	client, err := remote.NewClient(account, prompt)
-	fatalIf(err)
-	if err := client.Connect(); err != nil {
-		fatalIf(err)
+	// One connection per transfer worker so parallel uploads never share
+	// a transport between goroutines; browsing uses the first one.
+	nconns := workers
+	if nconns < 1 {
+		nconns = 1
 	}
-	defer client.Close()
+	pool := make([]domain.RemoteClient, 0, nconns)
+	for i := 0; i < nconns; i++ {
+		c, err := remote.NewClient(account, prompt)
+		fatalIf(err)
+		if err := c.Connect(); err != nil {
+			for _, open := range pool {
+				_ = open.Close()
+			}
+			fatalIf(err)
+		}
+		pool = append(pool, c)
+	}
+	client := pool[0]
+	defer func() {
+		for _, c := range pool {
+			_ = c.Close()
+		}
+	}()
 	fmt.Fprintf(os.Stderr, "Connecting to %s...\n", account.Name)
 
 	ignores := ignoreengine.NewExclusionsOnly(project.Exclusions)
@@ -628,6 +666,7 @@ func runLocalUpload(project config.Project, account config.Account, prompt remot
 		sink := syncer.NewTransferSink()
 		executor := &syncer.Executor{
 			Client:     client,
+			Clients:    pool,
 			Workers:    workers,
 			OnEvent:    sink.Record,
 			OnProgress: sink.RecordProgress,

@@ -33,16 +33,25 @@ type Executor struct {
 	LocalRoot  string
 	RemoteRoot string
 	Client     domain.RemoteClient
+	// Clients is an optional pool of connections, one per worker. When
+	// set, each worker goroutine uses exactly one client for the whole
+	// run, so a transport is never shared between goroutines (mirrors
+	// Planner.CompareClients). Falls back to Client when empty.
+	Clients    []domain.RemoteClient
 	Workers    int
 	OnEvent    func(Event)
 	OnProgress func(Progress)
 }
 
 func (e *Executor) Execute(ctx context.Context, items []*domain.SyncFileItem) error {
+	deleteClient := e.Client
+	if len(e.Clients) > 0 {
+		deleteClient = e.Clients[0]
+	}
 	for _, item := range items {
 		switch item.Action {
 		case domain.ActionDeleteRemote, domain.ActionDeleteLocal:
-			if err := e.executeOne(ctx, item); err != nil {
+			if err := e.executeOne(ctx, deleteClient, item); err != nil {
 				e.emit(item, err)
 				return err
 			}
@@ -57,8 +66,12 @@ func (e *Executor) Execute(ctx context.Context, items []*domain.SyncFileItem) er
 			dirs[path.Dir(e.remotePath(item))] = struct{}{}
 		}
 	}
+	mkdirClient := e.Client
+	if len(e.Clients) > 0 {
+		mkdirClient = e.Clients[0]
+	}
 	for d := range dirs {
-		if err := e.Client.MkdirAll(d); err != nil {
+		if err := mkdirClient.MkdirAll(d); err != nil {
 			return fmt.Errorf("create remote dir %s: %w", d, err)
 		}
 	}
@@ -66,18 +79,26 @@ func (e *Executor) Execute(ctx context.Context, items []*domain.SyncFileItem) er
 	if workers <= 0 {
 		workers = 4
 	}
+	// When a pool is provided, each worker owns exactly one client, so a
+	// transport is never used from two goroutines at once. Cap workers to
+	// the pool size rather than sharing a client between workers.
+	pool := e.Clients
+	if len(pool) > 0 && workers > len(pool) {
+		workers = len(pool)
+	}
 	jobs := make(chan *domain.SyncFileItem)
 	errCh := make(chan error, 1)
 	var wg sync.WaitGroup
 	for i := 0; i < workers; i++ {
+		client := e.clientFor(i)
 		wg.Add(1)
-		go func() {
+		go func(client domain.RemoteClient) {
 			defer wg.Done()
 			for item := range jobs {
 				if item.Action != domain.ActionUpload && item.Action != domain.ActionDownload {
 					continue
 				}
-				if err := e.executeOne(ctx, item); err != nil {
+				if err := e.executeOne(ctx, client, item); err != nil {
 					e.emit(item, err)
 					select {
 					case errCh <- err:
@@ -87,7 +108,7 @@ func (e *Executor) Execute(ctx context.Context, items []*domain.SyncFileItem) er
 				}
 				e.emit(item, nil)
 			}
-		}()
+		}(client)
 	}
 	for _, item := range items {
 		select {
@@ -108,7 +129,14 @@ func (e *Executor) Execute(ctx context.Context, items []*domain.SyncFileItem) er
 	}
 }
 
-func (e *Executor) executeOne(ctx context.Context, item *domain.SyncFileItem) error {
+func (e *Executor) clientFor(i int) domain.RemoteClient {
+	if len(e.Clients) > 0 {
+		return e.Clients[i%len(e.Clients)]
+	}
+	return e.Client
+}
+
+func (e *Executor) executeOne(ctx context.Context, client domain.RemoteClient, item *domain.SyncFileItem) error {
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
@@ -118,11 +146,11 @@ func (e *Executor) executeOne(ctx context.Context, item *domain.SyncFileItem) er
 	remotePath := e.remotePath(item)
 	switch item.Action {
 	case domain.ActionUpload:
-		return e.upload(item, localPath, remotePath, item.LocalStat)
+		return e.upload(client, item, localPath, remotePath, item.LocalStat)
 	case domain.ActionDownload:
-		return e.download(item, remotePath, localPath, item.RemoteStat)
+		return e.download(client, item, remotePath, localPath, item.RemoteStat)
 	case domain.ActionDeleteRemote:
-		if err := e.Client.Remove(remotePath); err != nil {
+		if err := client.Remove(remotePath); err != nil {
 			return fmt.Errorf("delete remote %s: %w", remotePath, err)
 		}
 		return nil
@@ -150,7 +178,7 @@ func (e *Executor) remotePath(item *domain.SyncFileItem) string {
 	return path.Join(e.RemoteRoot, item.Scope, item.RelativePath)
 }
 
-func (e *Executor) upload(item *domain.SyncFileItem, localPath, remotePath string, meta *domain.FileMeta) error {
+func (e *Executor) upload(client domain.RemoteClient, item *domain.SyncFileItem, localPath, remotePath string, meta *domain.FileMeta) error {
 	input, err := os.Open(localPath)
 	if err != nil {
 		return fmt.Errorf("open local %s: %w", localPath, err)
@@ -158,7 +186,7 @@ func (e *Executor) upload(item *domain.SyncFileItem, localPath, remotePath strin
 	defer input.Close()
 
 	write := func(target string) error {
-		output, err := e.Client.OpenWriter(target)
+		output, err := client.OpenWriter(target)
 		if err != nil {
 			return fmt.Errorf("open remote %s: %w", target, err)
 		}
@@ -174,32 +202,32 @@ func (e *Executor) upload(item *domain.SyncFileItem, localPath, remotePath strin
 		return nil
 	}
 
-	if renamer, ok := e.Client.(domain.RenameCapable); ok {
+	if renamer, ok := client.(domain.RenameCapable); ok {
 		tmp := remotePath + ".preflight-tmp"
 		if err := write(tmp); err != nil {
 			return err
 		}
 		if err := renamer.Rename(tmp, remotePath); err != nil {
-			_ = e.Client.Remove(tmp)
+			_ = client.Remove(tmp)
 			// Some servers refuse to rename over an existing file: retry as
 			// a direct write, keeping the original error if that fails too.
 			if _, seekErr := input.Seek(0, io.SeekStart); seekErr == nil {
 				if err2 := write(remotePath); err2 == nil {
-					return e.setTimes(remotePath, meta)
+					return e.setTimes(client, remotePath, meta)
 				}
 			}
 			return fmt.Errorf("rename %s -> %s: %w", tmp, remotePath, err)
 		}
-		return e.setTimes(remotePath, meta)
+		return e.setTimes(client, remotePath, meta)
 	}
 	if err := write(remotePath); err != nil {
 		return err
 	}
-	return e.setTimes(remotePath, meta)
+	return e.setTimes(client, remotePath, meta)
 }
 
-func (e *Executor) setTimes(remotePath string, meta *domain.FileMeta) error {
-	times, ok := e.Client.(domain.ChtimesCapable)
+func (e *Executor) setTimes(client domain.RemoteClient, remotePath string, meta *domain.FileMeta) error {
+	times, ok := client.(domain.ChtimesCapable)
 	if !ok || meta == nil || meta.ModTime.IsZero() {
 		return nil
 	}
@@ -209,8 +237,8 @@ func (e *Executor) setTimes(remotePath string, meta *domain.FileMeta) error {
 	return nil
 }
 
-func (e *Executor) download(item *domain.SyncFileItem, remotePath, localPath string, meta *domain.FileMeta) error {
-	input, err := e.Client.OpenReader(remotePath)
+func (e *Executor) download(client domain.RemoteClient, item *domain.SyncFileItem, remotePath, localPath string, meta *domain.FileMeta) error {
+	input, err := client.OpenReader(remotePath)
 	if err != nil {
 		return fmt.Errorf("open remote %s: %w", remotePath, err)
 	}

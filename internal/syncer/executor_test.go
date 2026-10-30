@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -318,6 +319,42 @@ type brokenWriterClient struct {
 	*memClient
 }
 
+// ownedClient wraps memClient and records how many writers are open at
+// once, proving a pooled client is never touched by two workers together.
+type ownedClient struct {
+	*memClient
+	current atomic.Int32
+	max     atomic.Int32
+}
+
+func newOwnedClient() *ownedClient { return &ownedClient{memClient: newMemClient()} }
+
+func (c *ownedClient) OpenWriter(path string) (io.WriteCloser, error) {
+	cur := c.current.Add(1)
+	for {
+		old := c.max.Load()
+		if cur <= old || c.max.CompareAndSwap(old, cur) {
+			break
+		}
+	}
+	w, err := c.memClient.OpenWriter(path)
+	if err != nil {
+		c.current.Add(-1)
+		return nil, err
+	}
+	return &ownedWriter{WriteCloser: w, done: func() int32 { return c.current.Add(-1) }}, nil
+}
+
+type ownedWriter struct {
+	io.WriteCloser
+	done func() int32
+}
+
+func (w *ownedWriter) Close() error {
+	defer w.done()
+	return w.WriteCloser.Close()
+}
+
 func (c *brokenWriterClient) OpenWriter(string) (io.WriteCloser, error) {
 	return nil, errors.New("boom")
 }
@@ -408,6 +445,65 @@ func TestPlannerKeepsSelectionSuffixWithinMapping(t *testing.T) {
 	}
 	if len(items) != 1 || items[0].RemotePath != "/web/assets/logo.svg" || items[0].Scope != "public/assets" {
 		t.Fatalf("mapped item = %+v", items)
+	}
+}
+
+func TestExecutorPoolGivesEachWorkerItsOwnClient(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	const files = 20
+	var items []*domain.SyncFileItem
+	for i := 0; i < files; i++ {
+		name := strings.Join([]string{"file", string(rune('a' + i)), ".txt"}, "")
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("payload"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		items = append(items, uploadItem(name))
+	}
+	pool := []*ownedClient{newOwnedClient(), newOwnedClient(), newOwnedClient(), newOwnedClient()}
+	clients := make([]domain.RemoteClient, 0, len(pool))
+	for _, c := range pool {
+		clients = append(clients, c)
+	}
+	e := &Executor{LocalRoot: dir, RemoteRoot: "/srv", Client: pool[0], Clients: clients, Workers: len(pool)}
+	if err := e.Execute(context.Background(), items); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	total := 0
+	for _, c := range pool {
+		total += len(c.files)
+		if got := c.current.Load(); got != 0 {
+			t.Fatalf("client left %d in-flight writers, want 0", got)
+		}
+		if got := c.max.Load(); got > 1 {
+			t.Fatalf("client saw %d concurrent writers, want at most 1 (one worker per client)", got)
+		}
+	}
+	if total != files {
+		t.Fatalf("uploaded %d files across pool, want %d", total, files)
+	}
+}
+
+func TestExecutorPoolCapsWorkersToPoolSize(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	const files = 6
+	var items []*domain.SyncFileItem
+	for i := 0; i < files; i++ {
+		name := strings.Join([]string{"w", string(rune('a' + i)), ".txt"}, "")
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		items = append(items, uploadItem(name))
+	}
+	pool := []*ownedClient{newOwnedClient(), newOwnedClient()}
+	clients := []domain.RemoteClient{pool[0], pool[1]}
+	e := &Executor{LocalRoot: dir, RemoteRoot: "/srv", Client: pool[0], Clients: clients, Workers: 8}
+	if err := e.Execute(context.Background(), items); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if total := len(pool[0].files) + len(pool[1].files); total != files {
+		t.Fatalf("uploaded %d files, want %d", total, files)
 	}
 }
 
